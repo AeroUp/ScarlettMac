@@ -1,25 +1,28 @@
-# Scarlett Relay
+![Scarlett Relay. Xbox Series X|S for Apple Silicon.](assets/relay-header.jpg)
 
-Experimental Xbox Series X|S compatibility for Apple Silicon. Scarlett Relay builds on XCL and runs locally through CrossOver Preview and D3DMetal.
+Scarlett Relay is an experimental compatibility layer built on XCL. It runs locally on Apple Silicon through CrossOver Preview and D3DMetal.
 
 [GTA VI status](#gta-vi-status) · [Current work](#current-work) · [Build and run](#build-and-run)
 
+![GTA VI launch checklist: 4 verified milestones and 3 open. Xbox Series fixture: 43 to 44 passed and 6 to 7 failing out of 50 checks.](assets/relay-progress.png)
+
 ## GTA VI status
 
-**World loading reached. The first mission is still blocked.** Tested on the Xbox Series 1.0.2.1 build with an Apple M3 Max, CrossOver Preview 27.0.0.41073, and D3DMetal 4.0b3.
+**The first mission is still blocked during world loading.** The checklist tracks observed stages for Xbox Series build 1.0.2.1 on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3.
 
-| Milestone | Observed on Mac |
-| --- | --- |
-| Boot and intro | The executable starts offline and renders the intro. |
-| Setup and menus | Controller input works through setup. Menus render at about 30 FPS. |
-| World loading | Loading artwork renders while the game streams assets and builds GPU pipelines. |
-| First mission | The nine-minute shader test ended on loading artwork. Presentation stalled and the title's watchdog fired. |
+| Milestone | Status | Observed on Mac |
+| --- | --- | --- |
+| Offline boot | Verified | The Xbox Series executable starts offline. |
+| Intro | Verified | The opening graphics render. |
+| Setup and menus | Verified | Controller input works through setup. Menus render at about 30 FPS. |
+| World loader | Verified | The game draws loading artwork and reads world assets. |
+| Live 3D scene | Open | Frame presentation stalls during loading and the title's watchdog fires. |
+| Gameplay input | Open | In-world movement and camera control await a rendered scene. |
+| First mission | Open | A playable run through the first mission remains unverified. |
 
 ## Verified on Mac
 
-![Xbox Series compatibility fixture across three clean runs. The runs passed 43, 44, and 43 of 50 checks.](assets/mac-compatibility.png)
-
-The XCL fixture verifies GPU rendering and frame presentation, among other Xbox Series interfaces. Sparse buffer readback and a DirectStorage fence still fail. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+The last three clean XCL fixture runs passed **43, 44, and 43 of 50 checks**, including GPU rendering and frame presentation. Sparse buffer readback and a DirectStorage fence still fail. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
 
 **TuxBox Lanes** completed its scripted replay with the optional Lanes build. The game checked all 16 GPU-generated course rows, a winning run, a missed coin, a collision, and two rendered boards by pixel readback. [Reproduce the TuxBox Lanes replay](#reproduce-the-tuxbox-lanes-replay)
 
@@ -32,8 +35,8 @@ Local experiments on the M3 Max, updated 24 November 2026.
 | Area | What we measured | What we're testing |
 | --- | --- | --- |
 | Shader translation | Both builds translated the same 723 variants. The new translator used the fallback for 4 variants, down from 88. On the Mac GPU, 120 synthetic programs produced matching output with both translators. The game still stalled in the nine-minute run. | Measure which large compute shaders still take the longest to compile. [Upstream compiler change](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) |
-| Pipeline creation | Two pipeline builds held the same game thread for 43.4 and 47.3 seconds. One traced pipeline sat in the preload queue from 10 seconds into the run until the game thread claimed it at 151 seconds. | Prioritize the measured slow pipelines and check whether they finish before first use. |
-| Pipeline cache | D3DMetal returned an empty individual pipeline cache blob in a small compute test. A pipeline library saved in one process reopened successfully in a second. | Measure library reload times on a large compute pipeline. |
+| Pipeline creation | Prioritizing four selected pipelines started their builds around nine to ten seconds into the run. One still waited for the single background compile slot through the six-minute cap. The last frame was loading artwork. | Test a smaller shader form for the largest compute pipelines. |
+| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and about 2 to 3 ms in later processes. Loading an explicit pipeline library was also in that range. | Measure how much of the default driver cache behavior carries over to the game's larger pipelines. |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. The chart shows two individual retail runs, both of which stalled on loading artwork. | Check whether later runs also complete storage requests cleanly and whether that changes the loading outcome. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 
 ## Build and run
