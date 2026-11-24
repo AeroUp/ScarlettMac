@@ -3,12 +3,17 @@ set -eu
 
 root=${0:A:h:h}
 mode=run
+test_title=0
 if [[ ${1:-} == --inspect ]]; then
     mode=inspect
     shift
+elif [[ $# == 1 && $1 == --test-title ]]; then
+    test_title=1
+    set -- "$root/.build/test-title/xcl_testtitle.exe" -- --hello
 fi
 if [[ $# -eq 0 || ! -f "$1" ]]; then
     print -u2 'Usage: scripts/run.sh [--inspect] /path/to/game.exe [-- guest arguments]'
+    print -u2 '       scripts/run.sh --test-title (after scripts/build.sh --test-title)'
     exit 2
 fi
 
@@ -75,6 +80,12 @@ fi
 
 export CX_BOTTLE_PATH=${bottle:h}
 export XCL_DATA_ROOT='C:\scarlett-lab-data'
+if [[ $test_title == 1 ]]; then
+    fixture_root="$bottle/drive_c/scarlett-lab-data"
+    mkdir -p "$fixture_root"
+    fixture_state=$(mktemp -d "$fixture_root/test-run.XXXXXXXX")
+    XCL_DATA_ROOT+="\\${fixture_state:t}"
+fi
 export XCL_DXC_DIR='C:\scarlett-lab'
 export XCL_NETWORK=0
 export XCL_RECT_LIST_GS=${XCL_RECT_LIST_GS:-0}

@@ -6,8 +6,8 @@ revision=d0d9889514e94195ebcdbf86e23a60f4f5756189
 source="$root/.build/xcl-mac"
 patch="$root/patches/mac-compat.patch"
 
-if [[ $# -gt 1 || ( $# -eq 1 && $1 != --prepare ) ]]; then
-    print -u2 'Usage: scripts/build.sh [--prepare]'
+if [[ $# -gt 1 || ( $# -eq 1 && $1 != --prepare && $1 != --test-title ) ]]; then
+    print -u2 'Usage: scripts/build.sh [--prepare | --test-title]'
     exit 2
 fi
 
@@ -31,8 +31,20 @@ fi
 
 if [[ ${1:-} != --prepare ]]; then
     : "${SCARLETT_LLVM_MINGW:?Set SCARLETT_LLVM_MINGW to the extracted LLVM-MinGW directory}"
-    export PATH="$SCARLETT_LLVM_MINGW/bin:$PATH"
+    mingw=${SCARLETT_LLVM_MINGW:A}
+    export PATH="$mingw/bin:$PATH"
     export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=x86_64-w64-mingw32-clang
     cd "$source"
-    rustup run "${SCARLETT_RUST_TOOLCHAIN:-stable}" cargo build --release --locked --target x86_64-pc-windows-gnullvm -p xcl
+    packages=(-p xcl)
+    if [[ ${1:-} == --test-title ]]; then
+        packages+=(-p xcl-testtitle -p testgame-mw)
+    fi
+    rustup run "${SCARLETT_RUST_TOOLCHAIN:-stable}" cargo build --release --locked --target x86_64-pc-windows-gnullvm "${packages[@]}"
+    if [[ ${1:-} == --test-title ]]; then
+        fixture="$root/.build/test-title"
+        built="$source/target/x86_64-pc-windows-gnullvm/release"
+        mkdir -p "$fixture"
+        cp -R tests/data/testgame/. "$fixture"
+        cp "$built/xcl_testtitle.exe" "$built/testgame_mw.dll" "$mingw/x86_64-w64-mingw32/bin/libunwind.dll" "$fixture"
+    fi
 fi

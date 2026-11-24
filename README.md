@@ -8,7 +8,7 @@ These results were reproduced on an Apple M3 Max using CrossOver Preview and D3D
 
 | Test | Result |
 | --- | --- |
-| XCL's Xbox Series test title | Passed 43 of 50 checks, including GPU rendering and presentation. Remaining failures include sparse buffer readback and a DirectStorage fence. |
+| XCL's Xbox Series test title | Passed 43 to 44 of 50 checks across clean runs, including GPU rendering and presentation. Remaining failures include sparse buffer readback and a DirectStorage fence. |
 | Grand Theft Auto VI | Intro and menus rendered at about 30 FPS, and controller input worked through setup. World loading remains blocked, and the first mission is unplayable. |
 
 ## Build and run
@@ -29,6 +29,15 @@ scripts/run.sh /path/to/unpacked/game.exe
 Set `SCARLETT_BOTTLE_DIR` to use a dedicated bottle in another location. Set `SCARLETT_OPUS_DLL` to an x64 `libopus-0.dll` to enable the Opus decoder. The launcher stores local data in the bottle under `C:\scarlett-lab-data` and runs with outbound IP traffic disabled.
 
 The repository distributes project source, patches, and launcher scripts. Supply your own unpacked game files. [Source provenance](SOURCE-NOTICES.md)
+
+## Reproduce the compatibility checks
+
+Build XCL's synthetic Xbox Series test title from source and run it in the same bottle. Each test run gets fresh state because the fixture exercises file deletion. The process exits with the number of failed checks. Our clean runs exited with 6 or 7 failures, with one intermittent GPU-memory check accounting for the difference.
+
+```sh
+scripts/build.sh --test-title
+scripts/run.sh --test-title
+```
 
 ## Report a result
 
