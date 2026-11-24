@@ -16,7 +16,7 @@
 | Intro | Verified | The opening graphics render. |
 | Setup and menus | Verified | Controller input works through setup. Menus render at about 30 FPS. |
 | World loader | Verified | Controller input from the menu starts world loading. The game draws loading artwork and reads world assets. |
-| Live 3D scene | Open | The packed-shader test ended on loading artwork. In a later manual playtest, a GPU watchdog fired during world loading. |
+| Live 3D scene | Open | A test with three precompiled compute pipelines reached a black frame after loading artwork. A GPU watchdog fired before a playable scene appeared. |
 | Gameplay input | Open | In-world movement and camera control await a rendered scene. |
 | First mission | Open | A playable run through the first mission remains unverified. |
 
@@ -54,7 +54,7 @@ The activity trace shows how frame presentation, compute work, and storage reque
 | Shader translation | Structured loops reduced fallback from 88 to 4 across the same 723 shader variants. Packed tables let both large compute pipelines finish on the Mac. The larger D3DMetal build took 42.6 seconds. | Trace the rendering wait that persists after both pipelines complete. [Structured loops](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) · [Packed tables](https://github.com/ivall/xcl/pull/1448) |
 | Render scheduling | In one trace, the render thread waited on the same semaphore for at least 245 seconds after earlier successful releases. In the manual playtest, a graphics queue's recorded and submitted fence values matched the pending wait while the native completion value stayed at zero. | Trace the sparse streaming queue's native signals and the render queue waits that depend on them. |
 | Pipeline creation | Prioritizing four selected pipelines started their builds around nine to ten seconds into the run. One still waited for the single background compile slot through the six-minute cap. The last frame was loading artwork. | Measure whether upstream's descriptor-heap memory windows shorten pipeline builds under D3DMetal. [XCL change](https://github.com/xcl-dev/xcl/pull/680) |
-| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and 2 to 3 ms in later processes. Precompiling three selected GTA VI compute pipelines in the game bottle took 44.5 seconds. D3DMetal accepted all three. | Verify whether the game reuses those pipelines and whether world loading presents a new scene. [Windows warm-cache result](https://github.com/xcl-dev/xcl/issues/534#issuecomment-7138554827) |
+| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and 2 to 3 ms in later processes. Precompiling three selected GTA VI compute pipelines took 44.5 seconds. The next game run logged 3,208 presents and 89,065 storage requests with zero reported storage failures. The last captured frame was black. | Compare driver compile times with descriptor-heap memory windows enabled and disabled in the same build. [Windows warm-cache result](https://github.com/xcl-dev/xcl/issues/534#issuecomment-7138554827) |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 
 ## Build and run
