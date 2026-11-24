@@ -16,7 +16,7 @@ Scarlett Relay is an experimental compatibility layer built on XCL. It runs loca
 | Intro | Verified | The opening graphics render. |
 | Setup and menus | Verified | Controller input works through setup. Menus render at about 30 FPS. |
 | World loader | Verified | The game draws loading artwork and reads world assets. |
-| Live 3D scene | Open | Frame presentation stalls during loading and the title's watchdog fires. |
+| Live 3D scene | Open | The 11-minute packed-shader test still ended on loading artwork. |
 | Gameplay input | Open | In-world movement and camera control await a rendered scene. |
 | First mission | Open | A playable run through the first mission remains unverified. |
 
@@ -34,7 +34,7 @@ Local experiments on the M3 Max, updated 24 November 2026.
 
 | Area | What we measured | What we're testing |
 | --- | --- | --- |
-| Shader translation | Both builds translated the same 723 variants. The new translator used the fallback for 4 variants, down from 88. On the Mac GPU, 120 synthetic programs produced matching output with both translators. The game still stalled in the nine-minute run. | Measure which large compute shaders still take the longest to compile. [Upstream compiler change](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) |
+| Shader translation | Structured loops reduced fallback from 88 to 4 across the same 723 shader variants. In the latest game test, packed tables let both large compute pipelines finish on the Mac. The larger D3DMetal build took 42.6 seconds. | Trace the rendering wait that persists after both pipelines complete. [Structured loops](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) · [Packed tables](https://github.com/ivall/xcl/pull/1448) |
 | Pipeline creation | Prioritizing four selected pipelines started their builds around nine to ten seconds into the run. One still waited for the single background compile slot through the six-minute cap. The last frame was loading artwork. | Test a smaller shader form for the largest compute pipelines. |
 | Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and about 2 to 3 ms in later processes. Loading an explicit pipeline library was also in that range. | Measure how much of the default driver cache behavior carries over to the game's larger pipelines. |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. The chart shows two individual retail runs, both of which stalled on loading artwork. | Check whether later runs also complete storage requests cleanly and whether that changes the loading outcome. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
