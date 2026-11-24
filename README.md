@@ -52,10 +52,14 @@ The activity trace shows how frame presentation, compute work, and storage reque
 | Area | What we measured | What we're testing |
 | --- | --- | --- |
 | Shader translation | Structured loops reduced fallback from 88 to 4 across the same 723 shader variants. Packed tables let both large compute pipelines finish on the Mac. The larger D3DMetal build took 42.6 seconds. | Trace the rendering wait that persists after both pipelines complete. [Structured loops](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) · [Packed tables](https://github.com/ivall/xcl/pull/1448) |
-| Render scheduling | The manual playtest captured two queues waiting on each other during world loading. A fix for work recorded before Wait64 passed a two-copy ordering regression on D3D12 WARP in Windows 11 Arm. With the fix disabled, the first copy timed out. | Verify the same ordering and the first rendered scene under D3DMetal. [XCL ordering change](https://github.com/xcl-dev/xcl/pull/851) |
+| Render scheduling | The Wait64 ordering regression passed on Windows WARP and CrossOver D3DMetal. With the fix disabled on WARP, the first copy timed out. The patched title completed a 20-second D3DMetal boot with presentation disabled, recording 340 PresentX calls and 680 queue submits. | Verify the world-load transition with presentation enabled. [XCL ordering change](https://github.com/xcl-dev/xcl/pull/851) |
 | Pipeline creation | In two cold CPU-only comparisons on the same three world-loading shaders, descriptor-heap memory windows reduced mean DXC compile time from 46.8 to 42.4 seconds and total DXIL size by 8.8%. | Measure D3DMetal's native pipeline build time separately. [XCL change](https://github.com/xcl-dev/xcl/pull/680) |
 | Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and 2 to 3 ms in later processes. Precompiling three selected GTA VI compute pipelines took 44.5 seconds. The next game run logged 3,208 presents and 89,065 storage requests with zero reported storage failures. The last captured frame was black. | Compare driver compile times with descriptor-heap memory windows enabled and disabled in the same build. [Windows warm-cache result](https://github.com/xcl-dev/xcl/issues/534#issuecomment-7138554827) |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
+
+## Parallels fallback
+
+The retail launcher read the game from a read-only SSD share in Windows 11 Arm. This VM exposed neither the required CPU instruction set nor the 32- or 64-lane shader waves required by XCL. Its WARP adapter reported 4-lane waves. The launch stopped at those checks.
 
 ## Build and run
 
