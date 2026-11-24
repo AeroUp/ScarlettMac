@@ -1,0 +1,280 @@
+diff --git a/crates/xcl/src/hle/d3d12x/bind.rs b/crates/xcl/src/hle/d3d12x/bind.rs
+index 5161425..cee5586 100644
+--- a/crates/xcl/src/hle/d3d12x/bind.rs
++++ b/crates/xcl/src/hle/d3d12x/bind.rs
+@@ -1,3 +1,5 @@
++//! Modified for Scarlett macOS Lab on 2026-11-24.
++//!
+ //! Root arguments of console code, bound when it dispatches with a translated pipeline.
+ //!
+ //! A translated console shader reads its root arguments the console's way (user SGPRs s4…,
+@@ -1053,8 +1055,16 @@ unsafe fn root_args_summary(this: *mut c_void, buffer_words: usize) -> String {
+     what.join("; ")
+ }
+ 
++fn host_compute_bound(this: *mut c_void) -> bool {
++    super::real::is_host_compute(with(this, |s| s.pso))
++}
++
+ /// #33 SetComputeRootSignature (PC #29)
+ pub(super) unsafe extern "system" fn set_compute_root_signature(this: *mut c_void, rs: *mut c_void) {
++    if host_compute_bound(this) {
++        let f: unsafe extern "system" fn(*mut c_void, *mut c_void) = std::mem::transmute(super::real::orig_fn(this, 29));
++        return f(this, rs);
++    }
+     let layout = console_list::layout_of(rs as usize);
+     with(this, |s| {
+         s.args = vec![0u8; layout.as_ref().map_or(0, |l| l.size as usize)];
+@@ -1074,6 +1084,10 @@ pub(super) unsafe extern "system" fn set_compute_root_constant(this: *mut c_void
+ 
+ /// #39 SetComputeRoot32BitConstants (PC #35)
+ pub(super) unsafe extern "system" fn set_compute_root_constants(this: *mut c_void, i: u32, n: u32, data: *const u32, offset: u32) {
++    if host_compute_bound(this) {
++        let f: unsafe extern "system" fn(*mut c_void, u32, u32, *const u32, u32) = std::mem::transmute(super::real::orig_fn(this, 35));
++        return f(this, i, n, data, offset);
++    }
+     if !data.is_null() {
+         let bytes: Vec<u8> = std::slice::from_raw_parts(data, n as usize).iter().flat_map(|w| w.to_le_bytes()).collect();
+         put(this, i, offset, &bytes);
+@@ -1087,6 +1101,14 @@ pub(super) unsafe extern "system" fn set_compute_root_descriptor(this: *mut c_vo
+     put(this, i, 0, &va.to_le_bytes());
+ }
+ 
++pub(super) unsafe extern "system" fn set_compute_root_uav(this: *mut c_void, i: u32, va: u64) {
++    if host_compute_bound(this) {
++        let f: unsafe extern "system" fn(*mut c_void, u32, u64) = std::mem::transmute(super::real::orig_fn(this, 41));
++        return f(this, i, super::list_x::pc_va(va));
++    }
++    set_compute_root_descriptor(this, i, va);
++}
++
+ /// #25 SetPipelineState: noted, then bound as on the PC
+ pub(super) unsafe extern "system" fn set_pipeline_state(this: *mut c_void, pso: *mut c_void) {
+     with(this, |s| s.pso = pso as usize);
+@@ -1096,6 +1118,12 @@ pub(super) unsafe extern "system" fn set_pipeline_state(this: *mut c_void, pso:
+ /// #14 Dispatch: with a translated pipeline, on XCL's ABI with the kept root arguments
+ pub(super) unsafe extern "system" fn dispatch(this: *mut c_void, x: u32, y: u32, z: u32) {
+     let pso = super::pso_async::resolve_wait(with(this, |s| s.pso));
++    if super::real::is_host_compute(pso) {
++        let f: unsafe extern "system" fn(*mut c_void, u32, u32, u32) = std::mem::transmute(super::real::orig_fn(this, 14));
++        f(this, x, y, z);
++        count(DISPATCHES);
++        return;
++    }
+     let Some(list) = ID3D12GraphicsCommandList::from_raw_borrowed(&this) else { return };
+     if !super::real::is_translated_compute(pso) {
+         // a console pipeline without a translation (including a background build that
+diff --git a/crates/xcl/src/hle/d3d12x/device_x.rs b/crates/xcl/src/hle/d3d12x/device_x.rs
+index 0770857..502a98b 100644
+--- a/crates/xcl/src/hle/d3d12x/device_x.rs
++++ b/crates/xcl/src/hle/d3d12x/device_x.rs
+@@ -90,8 +90,9 @@ pub(super) unsafe extern "system" fn create_command_allocator_x(this: *mut c_voi
+     real::dev_create_command_allocator(this, pc_list_type(ty) as usize, riid, ppv)
+ }
+ 
+-unsafe fn create_list(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso: usize, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
++unsafe fn create_list(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso: usize, riid: *const GUID, ppv: *mut *mut c_void, closed_start: bool) -> HRESULT {
+     let dma = !riid.is_null() && guid_bytes(&*riid) == guid_bytes(&IID_XBOX_DMA_COMMAND_LIST);
++    let closed_start = closed_start && !dma;
+     let riid = if dma { &IID_GRAPHICS_COMMAND_LIST as *const GUID } else { riid };
+     let (node, ty) = (if node == 0 { 0 } else { 1 }, pc_list_type(ty) as usize);
+     let hr = if super::console_list::enabled() {
+@@ -113,7 +114,21 @@ unsafe fn create_list(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso:
+             }
+         }
+         if hr >= 0 && !ppv.is_null() && !(*ppv).is_null() {
+-            super::list_x::on_create(*ppv, alloc, pso, D3D12_COMMAND_LIST_TYPE(ty as i32));
++            if closed_start {
++                let list = *ppv;
++                let close_hr = real::close_pc_list(list);
++                if close_hr < 0 {
++                    ppv.write(std::ptr::null_mut());
++                    drop(ID3D12GraphicsCommandList::from_raw(list));
++                    return close_hr;
++                }
++                static CLOSED_X: AtomicU64 = AtomicU64::new(0);
++                if once(&CLOSED_X, 1) {
++                    crate::xlog_info!("D3D12.X: CreateCommandListX starts closed for reset-first recording");
++                }
++            }
++            let initial_alloc = if closed_start { 0 } else { alloc };
++            super::list_x::on_create(*ppv, initial_alloc, pso, D3D12_COMMAND_LIST_TYPE(ty as i32));
+         }
+         hr
+     };
+@@ -135,14 +150,17 @@ unsafe fn create_list(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso:
+ /// device #12 CreateCommandList(node mask, type, allocator, initial pipeline, riid, list):
+ /// console list types and the DMA list's IID
+ pub(super) unsafe extern "system" fn create_command_list_pc(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso: usize, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+-    create_list(this, node, ty, alloc, pso, riid, ppv)
++    create_list(this, node, ty, alloc, pso, riid, ppv, false)
+ }
+ 
+ /// device #73 CreateCommandListX(params { type @0; node mask @8 }, allocator, initial
+ /// pipeline, riid, list)
+ pub(super) unsafe extern "system" fn create_command_list_x(this: *mut c_void, params: *const u32, alloc: usize, pso: usize, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+     let (ty, node) = if params.is_null() { (0, 1) } else { (params.read_unaligned(), params.add(2).read_unaligned()) };
+-    create_list(this, node, ty, alloc, pso, riid, ppv)
++    let ty_kind = D3D12_COMMAND_LIST_TYPE(ty as i32);
++    let reset_first = pso == 0 && matches!(ty_kind, D3D12_COMMAND_LIST_TYPE_DIRECT | D3D12_COMMAND_LIST_TYPE_COMPUTE)
++        && std::env::var("XCL_CREATE_LIST_X_CLOSED").is_ok_and(|v| v == "1");
++    create_list(this, node, ty, alloc, pso, riid, ppv, reset_first)
+ }
+ 
+ /// device #60 CreateGraphicsPipelineStateX(desc, extension count, extensions, riid, pipeline):
+diff --git a/crates/xcl/src/hle/d3d12x/list_x.rs b/crates/xcl/src/hle/d3d12x/list_x.rs
+index e6ba2b6..eb10220 100644
+--- a/crates/xcl/src/hle/d3d12x/list_x.rs
++++ b/crates/xcl/src/hle/d3d12x/list_x.rs
+@@ -1,3 +1,5 @@
++//! Modified for Scarlett macOS Lab on 2026-11-24.
++//!
+ //! The console command list's own methods.
+ //!
+ //! The console's ID3D12GraphicsCommandList keeps the PC methods (some moved:
+@@ -3084,7 +3086,7 @@ pub(super) unsafe fn prepare_draw(list: *mut c_void) {
+ /// a console GPU address as the PC's (unified memory: the window buffer's)
+ /// A GPU address the title gave: its memory's PC address when it is the title's memory, else
+ /// as it is (a PC resource's GPU address – it may lie in a window's range by number).
+-fn pc_va(va: u64) -> u64 {
++pub(super) fn pc_va(va: u64) -> u64 {
+     if !crate::gpu::uma::get().is_some_and(|u| u.is_title_address(va as usize)) {
+         return va;
+     }
+diff --git a/crates/xcl/src/hle/d3d12x/real.rs b/crates/xcl/src/hle/d3d12x/real.rs
+index c4b6f32..6efa90c 100644
+--- a/crates/xcl/src/hle/d3d12x/real.rs
++++ b/crates/xcl/src/hle/d3d12x/real.rs
+@@ -1139,7 +1139,7 @@ fn console_slots(kind: Kind) -> Vec<(usize, usize)> {
+                 (39, b::set_compute_root_constants as usize),
+                 (41, b::set_compute_root_descriptor as usize),
+                 (43, b::set_compute_root_descriptor as usize),
+-                (45, b::set_compute_root_descriptor as usize),
++                (45, b::set_compute_root_uav as usize),
+                 (10, l::reset_x as usize),
+                 (28, l::begin_query_x as usize),
+                 (29, l::end_query_x as usize),
+@@ -1769,6 +1769,16 @@ unsafe extern "system" fn pso_release(this: *mut c_void) -> u32 {
+ /// same address and must not inherit its root signature or compute pass).
+ /// compute pipelines that run a translated console shader
+ static TRANSLATED_COMPUTE: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
++static HOST_COMPUTE: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
++
++pub(super) fn host_compute_enabled() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| std::env::var("XCL_HOST_COMPUTE").is_ok_and(|value| value == "1"))
++}
++
++pub(super) fn is_host_compute(pso: usize) -> bool {
++    pso != 0 && host_compute_enabled() && HOST_COMPUTE.lock().unwrap().as_ref().is_some_and(|s| s.contains(&pso))
++}
+ 
+ /// graphics pipelines built from translated console shaders
+ static TRANSLATED_GRAPHICS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+@@ -1845,6 +1855,11 @@ fn forget_pso(pso: usize) {
+     if let Some(s) = TRANSLATED_COMPUTE.lock().unwrap().as_mut() {
+         s.remove(&pso);
+     }
++    if host_compute_enabled() {
++        if let Some(s) = HOST_COMPUTE.lock().unwrap().as_mut() {
++            s.remove(&pso);
++        }
++    }
+     if let Some(s) = TRANSLATED_GRAPHICS.lock().unwrap().as_mut() {
+         s.remove(&pso);
+     }
+@@ -2530,6 +2545,16 @@ unsafe extern "system" fn dev_create_committed_resource_x(this: *mut c_void, pro
+             desc = pc_desc.as_ptr() as usize;
+         }
+     }
++    if host_compute_enabled() && flags == 0 && desc != 0
++        && u32::from_le_bytes(pc_desc[..4].try_into().unwrap()) == D3D12_RESOURCE_DIMENSION_BUFFER.0 as u32
++        && crate::gpu::shader::readable(props, std::mem::size_of::<D3D12_HEAP_PROPERTIES>())
++        && matches!((props as *const D3D12_HEAP_PROPERTIES).read_unaligned().Type, D3D12_HEAP_TYPE_DEFAULT | D3D12_HEAP_TYPE_UPLOAD | D3D12_HEAP_TYPE_READBACK)
++    {
++        let hr = dev_create_committed_resource(this, props, flags, desc, state, clear, riid, ppv);
++        static LOG: OnceLock<()> = OnceLock::new();
++        LOG.get_or_init(|| crate::xlog_info!("D3D12.X: host compute uses native committed buffers"));
++        return hr;
++    }
+     if desc != 0 {
+         if let Some(hr) = place_console_buffer(this, props, desc, state, clear, riid, ppv) {
+             return hr;
+@@ -2693,10 +2718,7 @@ macro_rules! as_usize {
+ /// subsequent Reset and console calls dispatch through the current native table.
+ unsafe extern "system" fn cl_close(this: *mut c_void) -> HRESULT {
+     super::list_x::before_close(this);
+-    let ext = *(this as *const usize);
+-    let f: RefFn = std::mem::transmute(orig_fn(this, slot_of(this, "Close")));
+-    let hr = f(this) as HRESULT;
+-    preserve_vtable(this, ext);
++    let hr = close_pc_list(this);
+     if hr < 0 {
+         let ty: RefFn = std::mem::transmute(orig_fn(this, slot_of(this, "GetType")));
+         crate::xlog_warn!("D3D12.X: command list {this:p} (type {}) Close → {:#x}", ty(this), hr as u32);
+@@ -2704,6 +2726,14 @@ unsafe extern "system" fn cl_close(this: *mut c_void) -> HRESULT {
+     hr
+ }
+ 
++pub(super) unsafe fn close_pc_list(this: *mut c_void) -> HRESULT {
++    let ext = *(this as *const usize);
++    let f: unsafe extern "system" fn(*mut c_void) -> HRESULT = std::mem::transmute(orig_fn(this, slot_of(this, "Close")));
++    let hr = f(this);
++    preserve_vtable(this, ext);
++    hr
++}
++
+ /// Reset (PC path): re-adopt the runtime's new open-state vtable if Reset replaced it.
+ unsafe extern "system" fn cl_reset(this: *mut c_void, allocator: *mut c_void, initial_state: *mut c_void) -> HRESULT {
+     let ext = *(this as *const usize);
+@@ -2714,6 +2744,9 @@ unsafe extern "system" fn cl_reset(this: *mut c_void, allocator: *mut c_void, in
+     preserve_vtable(this, ext);
+     if hr >= 0 {
+         super::list_x::on_pc_reset(this);
++        if is_host_compute(initial_state as usize) {
++            super::bind::reset(this, allocator as usize, initial_state as usize);
++        }
+     }
+     hr
+ }
+@@ -4376,6 +4409,13 @@ unsafe extern "system" fn dev_create_compute_pso(this: *mut c_void, desc: *const
+     // a console shader the recompiler could not take must not reach the driver: AMD's shader
+     // compiler crashes on the stripped DXIL (NOBC bitcode) instead of rejecting it
+     let hr = if console.is_some() { E_INVALIDARG } else { finish_pso(this, f, desc, riid, ppv) };
++    if hr >= 0 && host_compute_enabled() && !ppv.is_null() && !(*ppv).is_null()
++        && crate::gpu::shader::readable(desc as usize, std::mem::size_of::<D3D12_COMPUTE_PIPELINE_STATE_DESC>())
++        && shader_bytes(&(*(desc as *const D3D12_COMPUTE_PIPELINE_STATE_DESC)).CS).is_some_and(host_shader)
++    {
++        HOST_COMPUTE.lock().unwrap().get_or_insert_with(HashSet::new).insert(*ppv as usize);
++        crate::xlog_info!("D3D12.X: host compute PSO {:p} accepted", *ppv);
++    }
+     if hr >= 0 || !crate::gpu::shader::readable(desc as usize, std::mem::size_of::<D3D12_COMPUTE_PIPELINE_STATE_DESC>()) {
+         return hr;
+     }
+diff --git a/crates/xcl/src/hle/d3d12x/title_list.rs b/crates/xcl/src/hle/d3d12x/title_list.rs
+index 05de94b..df57ed5 100644
+--- a/crates/xcl/src/hle/d3d12x/title_list.rs
++++ b/crates/xcl/src/hle/d3d12x/title_list.rs
+@@ -1,3 +1,5 @@
++//! Modified for Scarlett macOS Lab on 2026-11-24.
++//!
+ //! Command lists of console code.
+ //!
+ //! The D3D12.X code compiled into a title (the SDK's inline functions) writes command records
+@@ -150,8 +152,15 @@ unsafe extern "system" fn reset(this: *mut c_void, alloc: usize, pso: usize) ->
+         super::list_x::reset_x(primary, alloc, pso)
+     } else {
+         let f: unsafe extern "system" fn(*mut c_void, usize, usize) -> HRESULT = std::mem::transmute(pc_slot(primary, 10));
+-        f(primary, alloc, pso)
++        let hr = f(primary, alloc, pso);
++        if hr >= 0 && super::real::is_host_compute(pso) {
++            super::bind::reset(primary, alloc, pso);
++        }
++        hr
+     };
++    if super::real::host_compute_enabled() && pso != 0 {
++        crate::xlog_info!("D3D12.X: command list Reset ({primary:p}, initial pipeline {pso:#x}) → {:#x}", hr as u32);
++    }
+     if hr >= 0 {
+         *((this as usize + F_BACKING) as *mut usize) = primary as usize;
+         let moved = {

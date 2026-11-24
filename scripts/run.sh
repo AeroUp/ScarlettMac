@@ -4,16 +4,24 @@ set -eu
 root=${0:A:h:h}
 mode=run
 test_title=0
+source=xcl-mac
 if [[ ${1:-} == --inspect ]]; then
     mode=inspect
     shift
 elif [[ $# == 1 && $1 == --test-title ]]; then
     test_title=1
     set -- "$root/.build/test-title/xcl_testtitle.exe" -- --hello
+elif [[ ${1:-} == --lanes ]]; then
+    source=xcl-mac-lanes
+    export XCL_CREATE_LIST_X_CLOSED=1
+    export XCL_HOST_COMPUTE=1
+    unset XCL_CONSOLE_LISTS
+    shift
 fi
 if [[ $# -eq 0 || ! -f "$1" ]]; then
     print -u2 'Usage: scripts/run.sh [--inspect] /path/to/game.exe [-- guest arguments]'
     print -u2 '       scripts/run.sh --test-title (after scripts/build.sh --test-title)'
+    print -u2 '       scripts/run.sh --lanes /path/to/lanes.exe [-- guest arguments]'
     exit 2
 fi
 
@@ -28,7 +36,7 @@ app=${SCARLETT_CROSSOVER_APP:-/Applications/CrossOver Preview.app}
 wine="$app/Contents/SharedSupport/CrossOver/bin/wine"
 bottle=${SCARLETT_BOTTLE_DIR:-$HOME/Library/Application Support/CrossOver/Bottles/ScarlettLab}
 bottle=${bottle:A}
-compiled="$root/.build/xcl-mac/target/x86_64-pc-windows-gnullvm/release/xcl.exe"
+compiled="$root/.build/$source/target/x86_64-pc-windows-gnullvm/release/xcl.exe"
 : "${SCARLETT_LLVM_MINGW:?Set SCARLETT_LLVM_MINGW to the extracted LLVM-MinGW directory}"
 : "${SCARLETT_DXC_DIR:?Set SCARLETT_DXC_DIR to the directory with the x64 DXC DLLs}"
 unwind="$SCARLETT_LLVM_MINGW/x86_64-w64-mingw32/bin/libunwind.dll"

@@ -9,6 +9,7 @@ These results were reproduced on an Apple M3 Max using CrossOver Preview and D3D
 | Test | Result |
 | --- | --- |
 | XCL's Xbox Series test title | Passed 43 to 44 of 50 checks across clean runs, including GPU rendering and presentation. Remaining failures include sparse buffer readback and a DirectStorage fence. |
+| TuxBox Lanes | Completed the Series homebrew game's scripted replay with the optional Lanes build. The game verified its GPU-generated course, a winning run, a missed coin, a collision, and two rendered boards by pixel readback. |
 | Grand Theft Auto VI | Intro and menus rendered at about 30 FPS, and controller input worked through setup. World loading remains blocked, and the first mission is unplayable. |
 
 ## Build and run
@@ -38,6 +39,17 @@ Build XCL's synthetic Xbox Series test title from source and run it in the same 
 scripts/build.sh --test-title
 scripts/run.sh --test-title
 ```
+
+## Reproduce the TuxBox Lanes replay
+
+Build Lanes from the pinned TuxBox revision and place `lanes.exe` and the original `MicrosoftGame.config` in their own directory. Use the TuxBox build requirements to produce the executable. Scarlett macOS Lab supplies the Xbox interfaces for this run. [TuxBox Lanes source and build guide](https://github.com/brcly/TuxBox/tree/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/examples/lanes)
+
+```sh
+scripts/build.sh --lanes
+scripts/run.sh --lanes /path/to/lanes/lanes.exe -- --replay
+```
+
+The replay runs without a window and reports `course=16/16 win=16/16 safe-miss=1 collision=1 frames=2 input=gameinput` on success. The Lanes build enables host compute and native committed buffers for this test.
 
 ## Report a result
 
