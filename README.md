@@ -1,10 +1,10 @@
-![Scarlett Relay for Mac](assets/relay-header.jpg)
+![ScarlettMac. Xbox Series X|S on Apple Silicon.](assets/scarlettmac-wordmark.png)
 
-**Scarlett Relay for Mac** is an experimental Xbox Series X|S compatibility layer built on XCL. It runs locally on Apple Silicon through CrossOver Preview and D3DMetal.
+**ScarlettMac** is an experimental Xbox Series X|S compatibility layer built on XCL. It runs locally on Apple Silicon through CrossOver Preview and D3DMetal.
 
 [GTA VI status](#gta-vi-status) · [Mac test coverage](#verified-on-mac) · [Current work](#current-work) · [Build and run](#build-and-run)
 
-![Scarlett Relay on Apple Silicon. GTA VI has 4 verified milestones and 3 open. Of 50 synthetic Xbox Series checks, 43 passed every run, 1 was intermittent, and 6 failed every run. The three runs passed 43, 44, and 43 checks.](assets/relay-progress.png)
+![ScarlettMac compatibility matrix by subsystem. GTA VI has 4 verified milestones and 3 open. Of 50 synthetic Xbox Series checks, 43 passed every run, 1 passed intermittently, and 6 failed every run. The three runs passed 43, 44, and 43 checks.](assets/relay-progress.png)
 
 ## GTA VI status
 
@@ -22,7 +22,7 @@
 
 ## Verified on Mac
 
-Each tile in the compatibility map is one check from XCL's synthetic Xbox Series test title. **43 passed every run, 1 was intermittent, and 6 failed every run.** The run chart shows 43, 44, and 43 passes out of 50. The results include GPU rendering and frame presentation. Sparse buffer readback and a DirectStorage fence still fail. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+Each stack in the compatibility matrix represents one check from XCL's synthetic Xbox Series test title. The top, middle, and bottom cells show runs 1, 2, and 3. **43 checks passed every run, 1 passed intermittently, and 6 failed every run.** The results include GPU rendering and frame presentation. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
 
 <details>
 <summary>Which checks are still open?</summary>
@@ -45,14 +45,16 @@ Each tile in the compatibility map is one check from XCL's synthetic Xbox Series
 
 Local experiments on the M3 Max, updated 24 November 2026.
 
-![Shader translation fallback fell from 88 to 4 in the same 723-shader sample. Two GTA VI runs logged 494 failures across 87,151 storage requests and zero across 87,242 requests.](assets/gta-experiments.png)
+![GTA VI world-load trace with frame presents, compute dispatches and DirectStorage requests. Shader translation fallback fell from 88 to 4 in the same 723-shader sample. DirectStorage reports fell from 494 failures in 87,151 requests to zero in 87,242. Three selected compute pipelines compiled in 44.5 seconds.](assets/gta-experiments.png)
+
+The activity trace shows how frame presentation, compute work, and storage requests changed during one run. The horizontal axis follows the order of recorded samples. The final captured frame still showed loading artwork.
 
 | Area | What we measured | What we're testing |
 | --- | --- | --- |
 | Shader translation | Structured loops reduced fallback from 88 to 4 across the same 723 shader variants. Packed tables let both large compute pipelines finish on the Mac. The larger D3DMetal build took 42.6 seconds. | Trace the rendering wait that persists after both pipelines complete. [Structured loops](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) · [Packed tables](https://github.com/ivall/xcl/pull/1448) |
 | Render scheduling | In one trace, the render thread waited on the same semaphore for at least 245 seconds after earlier successful releases. In the manual playtest, a graphics queue's recorded and submitted fence values matched the pending wait while the native completion value stayed at zero. | Trace the sparse streaming queue's native signals and the render queue waits that depend on them. |
 | Pipeline creation | Prioritizing four selected pipelines started their builds around nine to ten seconds into the run. One still waited for the single background compile slot through the six-minute cap. The last frame was loading artwork. | Measure whether upstream's descriptor-heap memory windows shorten pipeline builds under D3DMetal. [XCL change](https://github.com/xcl-dev/xcl/pull/680) |
-| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and about 2 to 3 ms in later processes. Loading an explicit pipeline library was also in that range. | Precompile a bounded set of compute pipelines in the same bottle, then compare world loading. A Windows tester reported reaching the first scene after warming the cache and preloading pipelines. [Windows test report](https://github.com/xcl-dev/xcl/issues/534#issuecomment-7138554827) |
+| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and 2 to 3 ms in later processes. Precompiling three selected GTA VI compute pipelines in the game bottle took 44.5 seconds. D3DMetal accepted all three. | Verify whether the game reuses those pipelines and whether world loading presents a new scene. [Windows warm-cache result](https://github.com/xcl-dev/xcl/issues/534#issuecomment-7138554827) |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 
 ## Build and run
@@ -85,7 +87,7 @@ scripts/run.sh --test-title
 
 ## Reproduce the TuxBox Lanes replay
 
-Build Lanes from the pinned TuxBox revision and place `lanes.exe` and the original `MicrosoftGame.config` in their own directory. Use the TuxBox build requirements to produce the executable. Scarlett Relay supplies the Xbox interfaces for this run. [TuxBox Lanes source and build guide](https://github.com/brcly/TuxBox/tree/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/examples/lanes)
+Build Lanes from the pinned TuxBox revision and place `lanes.exe` and the original `MicrosoftGame.config` in their own directory. Use the TuxBox build requirements to produce the executable. ScarlettMac supplies the Xbox interfaces for this run. [TuxBox Lanes source and build guide](https://github.com/brcly/TuxBox/tree/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/examples/lanes)
 
 ```sh
 scripts/build.sh --lanes
