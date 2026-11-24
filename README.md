@@ -1,10 +1,10 @@
-![Scarlett Relay. Xbox Series X|S for Apple Silicon.](assets/relay-header.jpg)
+![Scarlett Relay for Mac](assets/relay-header.jpg)
 
-Scarlett Relay is an experimental compatibility layer built on XCL. It runs locally on Apple Silicon through CrossOver Preview and D3DMetal.
+**Scarlett Relay for Mac** is an experimental Xbox Series X|S compatibility layer built on XCL. It runs locally on Apple Silicon through CrossOver Preview and D3DMetal.
 
-[GTA VI status](#gta-vi-status) · [Current work](#current-work) · [Build and run](#build-and-run)
+[GTA VI status](#gta-vi-status) · [Mac test coverage](#verified-on-mac) · [Current work](#current-work) · [Build and run](#build-and-run)
 
-![GTA VI launch checklist: 4 verified milestones and 3 open. Xbox Series fixture: 43 to 44 passed and 6 to 7 failing out of 50 checks.](assets/relay-progress.png)
+![Scarlett Relay on Apple Silicon. GTA VI has 4 verified milestones and 3 open. Of 50 synthetic Xbox Series checks, 43 passed every run, 1 was intermittent, and 6 failed every run. The three runs passed 43, 44, and 43 checks.](assets/relay-progress.png)
 
 ## GTA VI status
 
@@ -15,14 +15,29 @@ Scarlett Relay is an experimental compatibility layer built on XCL. It runs loca
 | Offline boot | Verified | The Xbox Series executable starts offline. |
 | Intro | Verified | The opening graphics render. |
 | Setup and menus | Verified | Controller input works through setup. Menus render at about 30 FPS. |
-| World loader | Verified | The game draws loading artwork and reads world assets. |
-| Live 3D scene | Open | The 11-minute packed-shader test still ended on loading artwork. |
+| World loader | Verified | Controller input from the menu starts world loading. The game draws loading artwork and reads world assets. |
+| Live 3D scene | Open | The packed-shader test ended on loading artwork. In a later manual playtest, a GPU watchdog fired during world loading. |
 | Gameplay input | Open | In-world movement and camera control await a rendered scene. |
 | First mission | Open | A playable run through the first mission remains unverified. |
 
 ## Verified on Mac
 
-The last three clean XCL fixture runs passed **43, 44, and 43 of 50 checks**, including GPU rendering and frame presentation. Sparse buffer readback and a DirectStorage fence still fail. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+Each tile in the compatibility map is one check from XCL's synthetic Xbox Series test title. **43 passed every run, 1 was intermittent, and 6 failed every run.** The run chart shows 43, 44, and 43 passes out of 50. The results include GPU rendering and frame presentation. Sparse buffer readback and a DirectStorage fence still fail. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+
+<details>
+<summary>Which checks are still open?</summary>
+
+| Tile | Subsystem | Observed result |
+| --- | --- | --- |
+| 11 | Window handling | Windows reported that the console window was uncloaked. |
+| 37 | DMA and title memory | The copy read the title's memory in one of three runs. |
+| 38 | GPU command list | Reading back a bottom-of-pipe 32-bit write returned zero. |
+| 39 | Sparse GPU memory | The GPU saw a stale value after a CPU write to a mapped buffer. |
+| 40 | Coherent memory | Reading back two values from the write-back buffer returned zeros. |
+| 41 | Sparse uploads | The first ring-buffer upload returned different bytes than expected. |
+| 46 | DirectStorage | The read did not signal the test's D3D12 fence. |
+
+</details>
 
 **TuxBox Lanes** completed its scripted replay with the optional Lanes build. The game checked all 16 GPU-generated course rows, a winning run, a missed coin, a collision, and two rendered boards by pixel readback. [Reproduce the TuxBox Lanes replay](#reproduce-the-tuxbox-lanes-replay)
 
@@ -35,9 +50,9 @@ Local experiments on the M3 Max, updated 24 November 2026.
 | Area | What we measured | What we're testing |
 | --- | --- | --- |
 | Shader translation | Structured loops reduced fallback from 88 to 4 across the same 723 shader variants. Packed tables let both large compute pipelines finish on the Mac. The larger D3DMetal build took 42.6 seconds. | Trace the rendering wait that persists after both pipelines complete. [Structured loops](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) · [Packed tables](https://github.com/ivall/xcl/pull/1448) |
-| Render scheduling | In a game trace, the render thread waited on the same semaphore for at least 245 seconds. Earlier releases on the same handle had succeeded. | Follow the tasks that release the semaphore and compare the game's fence values with D3DMetal's completion values. |
-| Pipeline creation | Prioritizing four selected pipelines started their builds around nine to ten seconds into the run. One still waited for the single background compile slot through the six-minute cap. The last frame was loading artwork. | Test a smaller shader form for the largest compute pipelines. |
-| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and about 2 to 3 ms in later processes. Loading an explicit pipeline library was also in that range. | Measure how much of the default driver cache behavior carries over to the game's larger pipelines. |
+| Render scheduling | In one trace, the render thread waited on the same semaphore for at least 245 seconds after earlier successful releases. In the manual playtest, a graphics queue's recorded and submitted fence values matched the pending wait while the native completion value stayed at zero. | Trace the sparse streaming queue's native signals and the render queue waits that depend on them. |
+| Pipeline creation | Prioritizing four selected pipelines started their builds around nine to ten seconds into the run. One still waited for the single background compile slot through the six-minute cap. The last frame was loading artwork. | Measure whether upstream's descriptor-heap memory windows shorten pipeline builds under D3DMetal. [XCL change](https://github.com/xcl-dev/xcl/pull/680) |
+| Pipeline cache | In a generated compute benchmark, D3DMetal took about 5.1 seconds on the first creation and about 2 to 3 ms in later processes. Loading an explicit pipeline library was also in that range. | Precompile a bounded set of compute pipelines in the same bottle, then compare world loading. A Windows tester reported reaching the first scene after warming the cache and preloading pipelines. [Windows test report](https://github.com/xcl-dev/xcl/issues/534#issuecomment-7138554827) |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 
 ## Build and run
