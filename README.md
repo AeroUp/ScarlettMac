@@ -1,16 +1,40 @@
-![Scarlett Relay. Xbox Series X|S compatibility for Apple Silicon.](assets/scarlett-relay.jpg)
+# Scarlett Relay
 
-**Scarlett Relay** is an experimental compatibility layer for Xbox Series X|S software on macOS. It builds on XCL and uses CrossOver Preview with D3DMetal. The builds and tests below run locally on Apple Silicon.
+Experimental Xbox Series X|S compatibility for Apple Silicon. Scarlett Relay builds on XCL and runs locally through CrossOver Preview and D3DMetal.
+
+[GTA VI status](#gta-vi-status) · [Current work](#current-work) · [Build and run](#build-and-run)
+
+## GTA VI status
+
+**World loading reached. The first mission is still blocked.** Tested on the Xbox Series 1.0.2.1 build with an Apple M3 Max, CrossOver Preview 27.0.0.41073, and D3DMetal 4.0b3.
+
+| Milestone | Observed on Mac |
+| --- | --- |
+| Boot and intro | The executable starts offline and renders the intro. |
+| Setup and menus | Controller input works through setup. Menus render at about 30 FPS. |
+| World loading | Loading artwork renders while the game streams assets and builds GPU pipelines. |
+| First mission | The nine-minute shader test ended on loading artwork. Presentation stalled and the title's watchdog fired. |
 
 ## Verified on Mac
 
-These results were reproduced on an Apple M3 Max using CrossOver Preview and D3DMetal.
+![Xbox Series compatibility fixture across three clean runs. The runs passed 43, 44, and 43 of 50 checks.](assets/mac-compatibility.png)
 
-| Test | Result |
-| --- | --- |
-| XCL's Xbox Series test title | Passed 43 to 44 of 50 checks across clean runs, including GPU rendering and presentation. Remaining failures include sparse buffer readback and a DirectStorage fence. |
-| TuxBox Lanes | Completed the Series homebrew game's scripted replay with the optional Lanes build. The game verified its GPU-generated course, a winning run, a missed coin, a collision, and two rendered boards by pixel readback. |
-| Grand Theft Auto VI | Intro and menus rendered at about 30 FPS, and controller input worked through setup. World loading remains blocked, and the first mission is unplayable. |
+The XCL fixture verifies GPU rendering and frame presentation, among other Xbox Series interfaces. Sparse buffer readback and a DirectStorage fence still fail. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+
+**TuxBox Lanes** completed its scripted replay with the optional Lanes build. The game checked all 16 GPU-generated course rows, a winning run, a missed coin, a collision, and two rendered boards by pixel readback. [Reproduce the TuxBox Lanes replay](#reproduce-the-tuxbox-lanes-replay)
+
+## Current work
+
+Local experiments on the M3 Max, updated 24 November 2026.
+
+![Shader translation fallback fell from 88 to 4 in the same 723-shader sample. Two GTA VI runs logged 494 failures across 87,151 storage requests and zero across 87,242 requests.](assets/gta-experiments.png)
+
+| Area | What we measured | What we're testing |
+| --- | --- | --- |
+| Shader translation | Both builds translated the same 723 variants. The new translator used the fallback for 4 variants, down from 88. On the Mac GPU, 120 synthetic programs produced matching output with both translators. The game still stalled in the nine-minute run. | Measure which large compute shaders still take the longest to compile. [Upstream compiler change](https://github.com/ivall/xcl/commit/b8b1f491ea5e075a82293f6ebefd8eceffc74de7) |
+| Pipeline creation | Two pipeline builds held the same game thread for 43.4 and 47.3 seconds. One traced pipeline sat in the preload queue from 10 seconds into the run until the game thread claimed it at 151 seconds. | Prioritize the measured slow pipelines and check whether they finish before first use. |
+| Pipeline cache | D3DMetal returned an empty individual pipeline cache blob in a small compute test. A pipeline library saved in one process reopened successfully in a second. | Measure library reload times on a large compute pipeline. |
+| DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. The chart shows two individual retail runs, both of which stalled on loading artwork. | Check whether later runs also complete storage requests cleanly and whether that changes the loading outcome. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 
 ## Build and run
 
