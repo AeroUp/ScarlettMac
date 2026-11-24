@@ -1,6 +1,6 @@
-# Scarlett macOS Lab
+![Scarlett Relay. Xbox Series X|S compatibility for Apple Silicon.](assets/scarlett-relay.jpg)
 
-Experimental Xbox Series X|S compatibility on Apple Silicon. Scarlett macOS Lab provides patches for XCL and independent build and launch scripts for testing unpacked Xbox Series games through CrossOver Preview.
+**Scarlett Relay** is an experimental compatibility layer for Xbox Series X|S software on macOS. It builds on XCL and uses CrossOver Preview with D3DMetal. The builds and tests below run locally on Apple Silicon.
 
 ## Verified on Mac
 
@@ -42,7 +42,7 @@ scripts/run.sh --test-title
 
 ## Reproduce the TuxBox Lanes replay
 
-Build Lanes from the pinned TuxBox revision and place `lanes.exe` and the original `MicrosoftGame.config` in their own directory. Use the TuxBox build requirements to produce the executable. Scarlett macOS Lab supplies the Xbox interfaces for this run. [TuxBox Lanes source and build guide](https://github.com/brcly/TuxBox/tree/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/examples/lanes)
+Build Lanes from the pinned TuxBox revision and place `lanes.exe` and the original `MicrosoftGame.config` in their own directory. Use the TuxBox build requirements to produce the executable. Scarlett Relay supplies the Xbox interfaces for this run. [TuxBox Lanes source and build guide](https://github.com/brcly/TuxBox/tree/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/examples/lanes)
 
 ```sh
 scripts/build.sh --lanes
