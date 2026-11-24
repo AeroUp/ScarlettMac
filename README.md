@@ -58,6 +58,11 @@ The activity trace shows how frame presentation, compute work, and storage reque
 | World-load shaders | The slowest sampled pipeline bind was a ray-tracing compute pass at 10.0 seconds. Five shader variants from the trace precompiled into D3DMetal pipelines in 18.8 seconds. The warmed run reached 3,498 PresentX calls and its last capture showed loading artwork. | Identify what stops queue submissions while shader builds continue. |
 | Ray-tracing memory | In a synthetic D3DMetal test, a shader read both successive CPU writes through the coherent shadow. An opt-in build routed a 2,199 MiB retail allocation through the same path. The 194-second offscreen test ended with 2,342 PresentX calls and loading artwork. | Trace the earlier stall with this allocation path enabled. |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
+| DirectStorage on D3DMetal | Fixed a valid fence being rejected. In a separate 64 KiB zlib test, an early-queued GPU command read stale bytes with shadow synchronization disabled and the correct bytes with it enabled. The retail test streamed assets, then Rosetta stopped at a float-to-half memory store. | Verify the first rendered world frame with the corrected memory path. |
+
+## Mullion fallback
+
+Mullion v0.5-alpha.4 ran in a separate CrossOver bottle. It passed 48 of 50 synthetic checks and let the GPU read XCL's imported host memory directly. The retail build got past a command-list allocator failure after an Xbox interface fix, then stopped at a memory access violation before its first frame. [Mullion release](https://github.com/dttdrv/mullion/releases/tag/v0.5-alpha.4)
 
 ## Parallels fallback
 
