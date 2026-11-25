@@ -14,11 +14,23 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 
 ### Captured on Mac
 
-| World loading | Rendered 3D opening |
-| --- | --- |
-| [<img src="assets/captures/world-loading.png" width="360" alt="Illustrated GTA VI loading screen captured on an M3 Max">](assets/captures/world-loading.png) | [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) |
+**XCL** reached first-run setup and world loading on an M3 Max.
 
-Both images are offscreen captures from the same Xbox Series X replay on a MacBook Pro with an M3 Max. [Opening title card and test details](docs/compatibility.md#victory-opening-cinematic)
+| Navigation settings | World loading |
+| --- | --- |
+| [<img src="assets/captures/navigation-menu.png" width="360" alt="GTA VI Navigation Experience menu with Minimap set to Dynamic">](assets/captures/navigation-menu.png) | [<img src="assets/captures/xcl-loading-artwork.png" width="360" alt="Illustrated GTA VI loading screen captured through XCL">](assets/captures/xcl-loading-artwork.png) |
+
+| Subtitle settings | Finish Setup |
+| --- | --- |
+| [<img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected">](assets/captures/subtitles-menu.png) | [<img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls">](assets/captures/setup-menu.png) |
+
+**VIctory** reached the opening title card and 3D cinematic in a separate Mac replay.
+
+| Opening title card | Rendered 3D opening |
+| --- | --- |
+| [<img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago">](assets/captures/opening-title-card.png) | [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) |
+
+[Replay details](docs/compatibility.md#victory-opening-cinematic)
 
 ### XCL launch milestones
 
@@ -34,12 +46,11 @@ Both images are offscreen captures from the same Xbox Series X replay on a MacBo
 
 ## How it works
 
-```mermaid
-flowchart LR
-    Game["Xbox Series game"] --> XCL["ScarlettMac / XCL"]
-    XCL --> CPU["CPU · Rosetta 2"]
-    XCL --> GPU["Graphics · D3DMetal"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/compatibility-flow-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/compatibility-flow-light.svg">
+  <img alt="An Xbox Series game runs through ScarlettMac and XCL. Rosetta 2 runs the x64 code, and D3DMetal runs the graphics on the Mac GPU." src="assets/compatibility-flow-dark.svg">
+</picture>
 
 XCL supplies Xbox system services. Rosetta 2 runs the game’s x64 code, and D3DMetal runs the translated graphics on the Mac GPU.
 

@@ -12,6 +12,8 @@ Tested on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3
   <img alt="Four of seven GTA VI launch stages reached on Apple M3 Max. The test reached world loading. A visible 3D scene, in-world controls, and the first mission are open." src="../assets/gta-launch-milestones-dark.svg">
 </picture>
 
+[Setup menus and world-loading captures](../README.md#captured-on-mac)
+
 <details>
 <summary>What each milestone measures</summary>
 
