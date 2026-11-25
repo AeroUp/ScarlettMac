@@ -4,6 +4,8 @@ Tested on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3
 
 ## GTA VI verification
 
+These milestones track the public XCL build. The separate experimental opening replay is documented below.
+
 <picture>
   <source media="(max-width: 480px) and (prefers-color-scheme: dark)" srcset="../assets/gta-launch-milestones-mobile-dark.svg">
   <source media="(max-width: 480px) and (prefers-color-scheme: light)" srcset="../assets/gta-launch-milestones-mobile-light.svg">
@@ -29,7 +31,7 @@ Tested on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3
 
 ## Measured changes
 
-The latest Series X replay captured a black frame after 150 seconds. GPU submissions continued and D3DMetal reported up to **16.8 GiB** of video memory.
+An XCL Series X replay captured a black frame after 150 seconds. GPU submissions continued and D3DMetal reported up to **16.8 GiB** of video memory.
 
 Selecting the main display plane restored the Series S account screen and loading artwork. The last visible capture showed that artwork at 182 seconds. The title’s GPU watchdog triggered at 217 seconds while a compute shader was still in preparation.
 
@@ -84,7 +86,7 @@ Three runs of XCL's synthetic test title returned 43, 44, and 43 passes out of 5
 
 ## ScarlettMac opening cinematic
 
-This separate ScarlettMac test ran Xbox Series build 1.0.2.1 with the VIctory runtime and the Series X device profile on an M3 Max with 48 GB of unified memory. The replay used CrossOver Preview and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
+This test used a private experimental ScarlettMac runtime based on VIctory. It ran Xbox Series build 1.0.2.1 with the Series X device profile on an M3 Max with 48 GB of unified memory, CrossOver Preview, and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
 
 | Stage | Capture | Observed on Mac |
 | --- | --- | --- |
@@ -92,7 +94,19 @@ This separate ScarlettMac test ran Xbox Series build 1.0.2.1 with the VIctory ru
 | Opening title card | [Frame 2383](../assets/captures/opening-title-card.png) | The opening title appeared after the game moved past the loading artwork. |
 | Rendered 3D opening | [Frame 2421](../assets/captures/opening-cinematic.png) | The camera moved through several rendered shots, including the car and driver shown here. Visual artifacts remain. |
 
-The safety monitor ended the replay after 397.6 seconds when macOS reported memory pressure. Gameplay controls remain unverified.
+The safety monitor ended the capture run after 397.6 seconds when macOS reported memory pressure.
+
+### Recent development tests
+
+| Area | Observed on M3 Max |
+| --- | --- |
+| Opening and input | The experimental runtime rendered the live 3D opening. A separate guarded run verified pause and resume input. Player movement and camera control remain unverified. |
+| Memory | With four expanded pools, the host presented at least 130 frames after the first visible 3D frame. Neither earlier game assertion recurred before the host memory guard ended the test. |
+| Shader translation | The runtime translated two previously unsupported pixel shaders, created their D3DMetal pipelines, and used both during the live run. |
+
+In the November 25, 2026 native-window shader test, the host presented at least 270 frames after the first visible 3D frame. The trial reached its 20-minute time limit without repeating either earlier game assertion.
+
+The opening showed parts of the skyline, with severe rendering artifacts and performance below 1 FPS. Gameplay remains unavailable.
 
 ## Mullion fallback
 

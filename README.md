@@ -20,7 +20,9 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 > [!WARNING]
 > **In development.** GTA VI gameplay is currently unavailable.
 
-**GTA VI reaches world loading through XCL on the M3 Max. A separate ScarlettMac replay rendered the opening 3D cinematic. Gameplay controls remain unverified.**
+**GTA VI reaches world loading through XCL on the M3 Max. Tests with a separate experimental runtime rendered the live 3D opening and verified pause and resume input.**
+
+The 3D opening ran below 1 FPS and showed severe rendering artifacts. Player movement and camera control remain unverified. The public build instructions cover the XCL runtime. [Development test results](docs/compatibility.md#recent-development-tests)
 
 ### Captured on Mac
 
@@ -34,7 +36,7 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 | --- | --- |
 | [<img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected">](assets/captures/subtitles-menu.png) | [<img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls">](assets/captures/setup-menu.png) |
 
-The **ScarlettMac** cinematic test captured the title card and the rendered opening scene.
+The experimental **ScarlettMac** runtime captured the title card and the rendered opening scene.
 
 | Opening title card | Rendered 3D opening |
 | --- | --- |
@@ -70,8 +72,8 @@ Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3.
 
 | Test | Result |
 | --- | --- |
-| GTA VI | Menus and world loading reached |
-| Xbox system checks | 43 of 50 passed in all three runs |
+| GTA VI on XCL | Menus and world loading reached |
+| Xbox system checks | 43, 44, and 43 of 50 passed |
 | TuxBox Lanes | Scripted replay passed with input and rendered-board checks |
 
 [Measurements, known issues, and reproduction steps](docs/compatibility.md)
