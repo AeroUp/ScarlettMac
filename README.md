@@ -5,19 +5,21 @@
 [![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-555555)](#how-it-works)
 [![GTA VI: World loading](https://img.shields.io/badge/GTA%20VI-World%20loading-9a6700)](#gta-vi-status)
 
-ScarlettMac runs Xbox Series X|S game code on Apple Silicon. It is an experimental compatibility layer built on [XCL](https://github.com/xcl-dev/xcl) and CrossOver.
+ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
 ## GTA VI status
 
-**GTA VI boots offline, shows the intro and menus, and starts loading the world. Gameplay remains unverified.**
+**GTA VI reaches world loading on the M3 Max. The next milestone is a visible 3D scene.**
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/gta-milestones-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/gta-milestones-light.png">
-  <img alt="Four of seven launch stages verified: offline boot, intro graphics, setup and menus, and world loading. The first visible 3D scene, in-world controls, and first mission are still open." src="assets/gta-milestones-dark.png">
+  <source media="(max-width: 480px) and (prefers-color-scheme: dark)" srcset="assets/gta-launch-milestones-mobile-dark.svg">
+  <source media="(max-width: 480px) and (prefers-color-scheme: light)" srcset="assets/gta-launch-milestones-mobile-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/gta-launch-milestones-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/gta-launch-milestones-light.svg">
+  <img alt="GTA VI launch milestones on M3 Max. Offline boot, intro graphics, and menus with controller input at about 30 FPS are verified. Loading artwork and asset reads were observed. The next milestone is a visible 3D scene. In-world controls and the first mission are open." src="assets/gta-launch-milestones-dark.svg">
 </picture>
 
-Tested with Xbox Series build 1.0.2.1. [See the evidence for each stage](docs/compatibility.md#gta-vi-verification)
+[Compatibility measurements and reproduction steps](docs/compatibility.md)
 
 ## How it works
 

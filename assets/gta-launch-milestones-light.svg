@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="444" viewBox="0 0 660 444" role="img" aria-labelledby="title description">
+  <title id="title">ScarlettMac GTA VI launch milestones</title>
+  <desc id="description">Four of seven stages reached on an Apple M3 Max. Offline boot, intro and menus are verified. Loading artwork and world asset reads were observed. A live 3D scene, gameplay controls and the first mission are open.</desc>
+  <rect x=".5" y=".5" width="659" height="443" rx="11" fill="#ffffff" stroke="#d1d9e0"/>
+  <path d="M12 1h636a11 11 0 0 1 11 11v62H1V12A11 11 0 0 1 12 1Z" fill="#f6f8fa"/>
+  <path d="M1 74.5h658M33 106v304" fill="none" stroke="#d1d9e0"/>
+  <path d="M33 106v150" fill="none" stroke="#1a7f37" stroke-opacity=".65" stroke-width="2"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+    <text x="24" y="32" fill="#1f2328" font-size="23" font-weight="700">World loading reached</text>
+    <text x="24" y="55" fill="#59636e" font-size="14">Xbox Series 1.0.2.1 · Apple M3 Max</text>
+    <text x="636" y="30" text-anchor="end" fill="#1f2328" font-size="13" font-weight="600">4 of 7 stages reached</text>
+    <g>
+      <rect x="498" y="43" width="18" height="8" rx="2" fill="#1a7f37"/>
+      <rect x="518" y="43" width="18" height="8" rx="2" fill="#1a7f37"/>
+      <rect x="538" y="43" width="18" height="8" rx="2" fill="#1a7f37"/>
+      <rect x="558" y="43" width="18" height="8" rx="2" fill="#805b10"/>
+      <rect x="578" y="43" width="18" height="8" rx="2" fill="#eef1f4" stroke="#d1d9e0"/>
+      <rect x="598" y="43" width="18" height="8" rx="2" fill="#eef1f4" stroke="#d1d9e0"/>
+      <rect x="618" y="43" width="18" height="8" rx="2" fill="#eef1f4" stroke="#d1d9e0"/>
+    </g>
+    <g>
+      <circle cx="33" cy="106" r="8.5" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.25"/>
+      <path d="m29 106 2.5 2.5 5-5" fill="none" stroke="#1a7f37" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="54" y="103" fill="#1f2328" font-size="16" font-weight="650">Offline boot</text>
+      <text x="54" y="122" fill="#59636e" font-size="14">The game starts with network access disabled.</text>
+      <rect x="562" y="96" width="74" height="22" rx="11" fill="#dafbe1"/>
+      <text x="599" y="111" text-anchor="middle" fill="#1a7f37" font-size="12" font-weight="700">Verified</text>
+    </g>
+    <g>
+      <circle cx="33" cy="156" r="8.5" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.25"/>
+      <path d="m29 156 2.5 2.5 5-5" fill="none" stroke="#1a7f37" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="54" y="153" fill="#1f2328" font-size="16" font-weight="650">Intro graphics</text>
+      <text x="54" y="172" fill="#59636e" font-size="14">The opening graphics render.</text>
+      <rect x="562" y="146" width="74" height="22" rx="11" fill="#dafbe1"/>
+      <text x="599" y="161" text-anchor="middle" fill="#1a7f37" font-size="12" font-weight="700">Verified</text>
+    </g>
+    <g>
+      <circle cx="33" cy="206" r="8.5" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.25"/>
+      <path d="m29 206 2.5 2.5 5-5" fill="none" stroke="#1a7f37" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="54" y="203" fill="#1f2328" font-size="16" font-weight="650">Setup and menus</text>
+      <text x="54" y="222" fill="#59636e" font-size="14">Controller input works. Menus run at about 30 FPS.</text>
+      <rect x="562" y="196" width="74" height="22" rx="11" fill="#dafbe1"/>
+      <text x="599" y="211" text-anchor="middle" fill="#1a7f37" font-size="12" font-weight="700">Verified</text>
+    </g>
+    <g>
+      <circle cx="33" cy="256" r="8.5" fill="#fff1ce" stroke="#805b10" stroke-width="1.25"/>
+      <circle cx="33" cy="256" r="3.25" fill="#805b10"/>
+      <text x="54" y="253" fill="#1f2328" font-size="16" font-weight="650">World loading</text>
+      <text x="54" y="272" fill="#59636e" font-size="14">Loading artwork appears and world assets are read.</text>
+      <rect x="562" y="246" width="74" height="22" rx="11" fill="#fff1ce"/>
+      <text x="599" y="261" text-anchor="middle" fill="#805b10" font-size="12" font-weight="700">Reached</text>
+    </g>
+    <g>
+      <circle cx="33" cy="306" r="8.5" fill="#ddf4ff" stroke="#0969da" stroke-width="1.25"/>
+      <path d="m31 303 3.5 3-3.5 3" fill="none" stroke="#0969da" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="54" y="303" fill="#1f2328" font-size="16" font-weight="650">Visible 3D scene</text>
+      <text x="54" y="322" fill="#59636e" font-size="14">Render a live frame of the game world.</text>
+      <rect x="562" y="296" width="74" height="22" rx="11" fill="#ddf4ff"/>
+      <text x="599" y="311" text-anchor="middle" fill="#0969da" font-size="12" font-weight="700">Next</text>
+    </g>
+    <g>
+      <circle cx="33" cy="356" r="8.5" fill="#ffffff" stroke="#59636e" stroke-width="1.25"/>
+      <text x="54" y="353" fill="#1f2328" font-size="16" font-weight="650">In-world controls</text>
+      <text x="54" y="372" fill="#59636e" font-size="14">Verify movement and camera input.</text>
+      <rect x="562" y="346" width="74" height="22" rx="11" fill="#eef1f4"/>
+      <text x="599" y="361" text-anchor="middle" fill="#59636e" font-size="12" font-weight="700">Open</text>
+    </g>
+    <g>
+      <circle cx="33" cy="406" r="8.5" fill="#ffffff" stroke="#59636e" stroke-width="1.25"/>
+      <text x="54" y="403" fill="#1f2328" font-size="16" font-weight="650">First mission</text>
+      <text x="54" y="422" fill="#59636e" font-size="14">Complete the opening mission in-game.</text>
+      <rect x="562" y="396" width="74" height="22" rx="11" fill="#eef1f4"/>
+      <text x="599" y="411" text-anchor="middle" fill="#59636e" font-size="12" font-weight="700">Open</text>
+    </g>
+  </g>
+</svg>
