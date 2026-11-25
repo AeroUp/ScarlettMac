@@ -4,7 +4,7 @@
 [![Tested on M3 Max](https://img.shields.io/badge/Tested-M3%20Max-5832A8)](#tested-on-mac)
 [![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-04a519)](#how-it-works)
 [![XCL: World loading](https://img.shields.io/badge/XCL-World%20loading-FFD700)](#gta-vi-status)
-[![VIctory: 3D opening](https://img.shields.io/badge/VIctory-3D%20opening-04a519)](#captured-on-mac)
+[![ScarlettMac 3D opening](https://img.shields.io/badge/ScarlettMac-3D%20opening-04a519)](#captured-on-mac)
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
@@ -12,7 +12,7 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 
 ## GTA VI status
 
-**GTA VI reaches world loading through XCL on the M3 Max. The VIctory test rendered the opening 3D cinematic. Gameplay controls remain unverified.**
+**GTA VI reaches world loading through XCL on the M3 Max. A separate ScarlettMac replay rendered the opening 3D cinematic. Gameplay controls remain unverified.**
 
 ### Captured on Mac
 
@@ -26,13 +26,13 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 | --- | --- |
 | [<img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected">](assets/captures/subtitles-menu.png) | [<img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls">](assets/captures/setup-menu.png) |
 
-**VIctory** reached the opening title card and 3D cinematic in a separate Mac replay.
+The **ScarlettMac** cinematic test captured the title card and the rendered opening scene.
 
 | Opening title card | Rendered 3D opening |
 | --- | --- |
 | [<img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago">](assets/captures/opening-title-card.png) | [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) |
 
-[Replay details](docs/compatibility.md#victory-opening-cinematic)
+[Replay details](docs/compatibility.md#scarlettmac-opening-cinematic)
 
 ### XCL launch milestones
 

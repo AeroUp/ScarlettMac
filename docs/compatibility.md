@@ -80,9 +80,11 @@ Three runs of XCL's synthetic test title returned 43, 44, and 43 passes out of 5
 | 41 | Sparse uploads | The first ring-buffer upload returned different bytes than expected. |
 | 46 | DirectStorage | The read did not signal the test's D3D12 fence. |
 
-## VIctory opening cinematic
+<a name="victory-opening-cinematic"></a>
 
-VIctory ran Xbox Series build 1.0.2.1 with the Series X device profile on an M3 Max with 48 GB of unified memory. The replay used CrossOver Preview and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
+## ScarlettMac opening cinematic
+
+This separate ScarlettMac test ran Xbox Series build 1.0.2.1 with the VIctory runtime and the Series X device profile on an M3 Max with 48 GB of unified memory. The replay used CrossOver Preview and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
 
 | Stage | Capture | Observed on Mac |
 | --- | --- | --- |
