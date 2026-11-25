@@ -1,14 +1,17 @@
 ![ScarlettMac. Xbox Series X|S on Apple Silicon.](assets/scarlettmac-wordmark.png)
 
-**ScarlettMac** is an experimental Xbox Series X|S compatibility layer built on XCL. It runs locally on Apple Silicon through CrossOver Preview and D3DMetal.
+**ScarlettMac** runs Xbox Series X|S game code locally on Apple Silicon through CrossOver Preview and D3DMetal. It builds on [XCL](https://github.com/xcl-dev/xcl).
 
 [GTA VI status](#gta-vi-status) · [Mac test coverage](#verified-on-mac) · [Current work](#current-work) · [Build and run](#build-and-run)
 
-![ScarlettMac compatibility matrix by subsystem. GTA VI has 4 verified milestones and 3 open. Of 50 synthetic Xbox Series checks, 43 passed every run, 1 passed intermittently, and 6 failed every run. The three runs passed 43, 44, and 43 checks.](assets/relay-progress.png)
-
 ## GTA VI status
 
-**The first mission is still blocked during world loading.** The checklist tracks observed stages for Xbox Series build 1.0.2.1 on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3.
+**GTA VI reaches the menus and starts loading the world on Mac. The first playable scene is still unverified.** This status is for Xbox Series build 1.0.2.1 on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3.
+
+![GTA VI on Mac. Offline boot, intro and menus are verified. World loading is the furthest verified stage. The first 3D scene, gameplay controls and first mission are open.](assets/gta-launch-progress.png)
+
+<details>
+<summary>See all seven launch stages</summary>
 
 | Milestone | Status | Observed on Mac |
 | --- | --- | --- |
@@ -20,9 +23,13 @@
 | Gameplay input | Open | In-world movement and camera control await a rendered scene. |
 | First mission | Open | A playable run through the first mission remains unverified. |
 
+</details>
+
 ## Verified on Mac
 
-Each stack in the compatibility matrix represents one check from XCL's synthetic Xbox Series test title. The top, middle, and bottom cells show runs 1, 2, and 3. **43 checks passed every run, 1 passed intermittently, and 6 failed every run.** The results include GPU rendering and frame presentation. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+XCL's small test title exercises 50 Xbox system features. **43 checks passed all three runs, 1 varied, and 6 failed all three.** Each tile below is one check. The fraction on each row counts checks that passed all three runs, out of the subsystem total. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
+
+![50 Xbox system checks across three Mac runs. 43 passed all three, one varied and six failed all three. Graphics and frame output passed 11 of 11. GPU memory and commands passed 0 of 5 consistently, with one intermittent check.](assets/relay-progress.png)
 
 <details>
 <summary>Which checks are still open?</summary>
@@ -43,11 +50,20 @@ Each stack in the compatibility matrix represents one check from XCL's synthetic
 
 ## Current work
 
-Local experiments on the M3 Max, updated 24 November 2026.
+Local experiments on the M3 Max, updated 25 November 2026.
 
-![GTA VI world-load trace with frame presents, compute dispatches and DirectStorage requests. Shader translation fallback fell from 88 to 4 in the same 723-shader sample. DirectStorage reports fell from 494 failures in 87,151 requests to zero in 87,242. Three selected compute pipelines compiled in 44.5 seconds.](assets/gta-experiments.png)
+### What improved
 
-The activity trace shows how frame presentation, compute work, and storage requests changed during one run. The horizontal axis follows the order of recorded samples. The final captured frame still showed loading artwork.
+![Three separate experiments. Shader fallback decreased from 88 to 4 out of the same 723 shaders. Failed storage reads fell from 494 of 87,151 to 0 of 87,242. Preparing the same two GPU pipelines took 25.1 seconds on the first offline pass and 0.3 seconds with the cache warmed.](assets/gta-experiments.png)
+
+### Where the latest run stopped
+
+The Series X replay reached world loading after account selection. The last capture was black at 150 seconds. GPU submissions continued, and D3DMetal reported a peak of 16.8 GiB of video memory in the recorded samples.
+
+![D3DMetal video memory over one Series X run on Apple Silicon. Account selection was at 44 seconds. The last captured frame was black at 150 seconds. The last memory sample was 16.8 GiB.](assets/world-load-memory.png)
+
+<details>
+<summary>Technical results and ongoing work</summary>
 
 | Area | What we measured | What we're testing |
 | --- | --- | --- |
@@ -60,11 +76,16 @@ The activity trace shows how frame presentation, compute work, and storage reque
 | Graphics shader preparation | In the warmed game run, a sampled pixel shader took 2.35 seconds to prepare. Native graphics pipeline creation stayed below 3.8 ms across the traced graphics pipelines. The paired offline precompiler filled two missing shader entries. A subsequent test reused all 22 cached shaders in a pack of 11 pairs from the trace. | Test the larger cache during another offscreen world load. |
 | Pipeline preload priority | All 15 selected pipelines were ready before account selection in the offscreen game run. The prior 26.9 seconds of waits on those keys did not recur in the traced window. Cache contents and scheduling both changed. Five different graphics binds waited a combined 14.7 seconds. The last capture still showed loading artwork. | Retest with the additional five pipelines cached. |
 | Guest semaphore publication | In the 20-pipeline run, five delayed guest values were written 21 to 145 ms after their native fences were observed complete. Submissions still stopped after those stores. | Check the later compute pipeline stalls. |
-| Late compute pipelines | One bind waited 20.9 seconds, and the next was still preparing a shader when the watchdog fired at 195.4 seconds on loading artwork. The offline pass prepared both exact variants and created both native pipelines in 25.1 seconds. The repeat took 0.3 seconds. | Verify cache reuse in the game and test world loading again. |
+| Late compute pipelines | Two compute pipelines that previously stalled world loading were ready before account selection. In the latest replay they built in 90 ms and 84 ms. The preload worker built all 22 selected pipelines before account selection. | Check other pipelines requested during the first world render. |
+| World-load memory | The earlier memory guard stopped the offscreen run at 169.2 seconds. The latest replay tracked 9,412 MiB of texture pages in use with no whole free texture heaps at its last memory sample. | Track texture residency through world loading. |
+| Series S profile | The title switched from native 4K to 1080p. All 62 sampled frames were black, and the offscreen run ended before account selection. | Test the guest memory budget and identify the missing startup render. |
+| macOS memory reporting | A title query treated about 255 GiB of reserved virtual address space as private usage. After the fix, an isolated CrossOver check reported essentially the same working set after reserving 8 GiB and counted the additional 64 MiB after it was touched. | Verify the corrected guest query in a Series S replay. [Wine process counters](https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/ntdll/unix/process.c) |
 | Ray-tracing memory | In a synthetic D3DMetal test, a shader read both successive CPU writes through the coherent shadow. An opt-in build routed a 2,199 MiB retail allocation through the same path. The 194-second run logged the Rosetta float-to-half store error before GPU submissions stopped on loading artwork. | Test the replacement store during world loading. |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 | DirectStorage on D3DMetal | Fixed a valid fence being rejected. In a separate 64 KiB zlib test, an early-queued GPU command read stale bytes with shadow synchronization disabled and the correct bytes with it enabled. The retail test streamed assets, then Rosetta stopped at a float-to-half memory store. | Verify the first rendered world frame with the corrected memory path. |
 | Rosetta float-to-half stores | The build replaced 70 stores, including the one that repeatedly stopped the title. Three CrossOver tests passed, including write-watch recovery across two pages. The offscreen retail run advanced beyond that failure and reached the game's GPU watchdog at 167.6 seconds. | Identify the GPU dependency that stalls world loading. |
+
+</details>
 
 ## Mullion fallback
 
