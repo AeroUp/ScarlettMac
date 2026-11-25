@@ -8,6 +8,8 @@
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
+[Build and run](#build-and-run) · [Compatibility results](docs/compatibility.md) · [Contribute](#contribute)
+
 ## GTA VI status
 
 **GTA VI reaches world loading through XCL on the M3 Max. The VIctory test rendered the opening 3D cinematic. Gameplay controls remain unverified.**
@@ -84,6 +86,10 @@ scripts/run.sh /path/to/unpacked/game.exe
 Set `SCARLETT_BOTTLE_DIR` to use a dedicated bottle in another location. Set `SCARLETT_OPUS_DLL` to an x64 `libopus-0.dll` to enable the Opus decoder. The launcher stores local data in the bottle under `C:\scarlett-lab-data` and runs with outbound IP traffic disabled.
 
 The repository distributes project source, patches, and launcher scripts. Supply your own unpacked game files. [Source provenance](SOURCE-NOTICES.md)
+
+## Contribute
+
+Help test ScarlettMac on more Apple Silicon Macs. You can run the synthetic Xbox test title, report a compatibility result, or improve the setup instructions. [Contributor guide](CONTRIBUTING.md) · [Open a report](https://github.com/paveledits/ScarlettMac/issues/new/choose)
 
 ## Credits and license
 

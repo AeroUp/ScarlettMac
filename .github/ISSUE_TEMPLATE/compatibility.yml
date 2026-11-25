@@ -1,0 +1,49 @@
+name: Compatibility report
+description: Report how far an Xbox Series title runs on your Mac.
+title: "[Compatibility] "
+body:
+  - type: markdown
+    attributes:
+      value: Remove personal details from logs and screenshots. Do not attach game files, saves, keys, or untrusted binaries.
+  - type: input
+    id: title-version
+    attributes:
+      label: Game and version
+      description: Include the exact title version and Series X or Series S profile tested.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Test environment
+      description: Include your Mac chip and RAM, macOS version, runtime and exact build or commit, CrossOver version, and graphics backend.
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Furthest milestone you verified
+      options:
+        - Could not boot
+        - Booted offline
+        - Intro graphics rendered
+        - Setup or menus reached
+        - World loading began
+        - Visible 3D scene or opening cinematic
+        - In-world movement and camera input verified
+        - First mission completed
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps and observed result
+      description: Include launch options, the last visible screen, and any stop or crash. For gameplay, describe the input and the visible response.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpt
+      description: Paste a short, redacted excerpt near the milestone or failure.
+      render: text

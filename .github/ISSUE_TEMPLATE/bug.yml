@@ -1,0 +1,34 @@
+name: Build or runtime bug
+description: Report a reproducible ScarlettMac build failure or runtime bug.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: Remove personal details from logs and screenshots. Do not attach game files, saves, keys, or untrusted binaries.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Test environment
+      description: Include your Mac chip and RAM, macOS version, and exact ScarlettMac or runtime build or commit. For runtime issues, add the CrossOver version, graphics backend, and title version if applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the build or launch command and relevant options. Replace private paths and values with placeholders.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+      description: Say what should happen, where it fails, and how often it happens.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpt
+      description: Paste the first error and surrounding lines with personal details removed.
+      render: text
