@@ -104,9 +104,14 @@ The safety monitor ended the capture run after 397.6 seconds when macOS reported
 | Memory | With four expanded pools, the host presented at least 130 frames after the first visible 3D frame. Neither earlier game assertion recurred before the host memory guard ended the test. |
 | Shader translation | The runtime translated two previously unsupported pixel shaders, created their D3DMetal pipelines, and used both during the live run. |
 
-In the November 25, 2026 native-window shader test, the host presented at least 270 frames after the first visible 3D frame. The trial reached its 20-minute time limit without repeating either earlier game assertion.
+In the November 25, 2026 native-window shader test, the host presented at least 270 frames after the first frame with 3D draws. The trial reached its 20-minute time limit without repeating either earlier game assertion.
 
-The opening showed parts of the skyline, with severe rendering artifacts and performance below 1 FPS. Gameplay remains unavailable.
+| Capture | Observed on Mac |
+| --- | --- |
+| [Pause menu, frame 2929](../assets/captures/development-pause-menu.png) | The pause menu opened over the cinematic during a separate native-window test. The opening resumed after closing it. |
+| [Skyline, frame 2982](../assets/captures/development-skyline.png) | The skyline was partially rendered. Both repaired pixel shaders had already been used in this run. |
+
+The opening showed severe rendering artifacts and performance below 1 FPS. Gameplay remains unavailable.
 
 ## Mullion fallback
 

@@ -42,7 +42,13 @@ The experimental **ScarlettMac** runtime captured the title card and the rendere
 | --- | --- |
 | [<img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago">](assets/captures/opening-title-card.png) | [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) |
 
-[Replay details](docs/compatibility.md#scarlettmac-opening-cinematic)
+Later native-window tests captured the pause menu during the opening and a partially rendered skyline. The skyline still shows severe lighting and geometry artifacts.
+
+| Pause menu during the opening | Skyline after shader fixes |
+| --- | --- |
+| [<img src="assets/captures/development-pause-menu.png" width="360" alt="The GTA VI pause menu open over the opening cinematic">](assets/captures/development-pause-menu.png) | [<img src="assets/captures/development-skyline.png" width="360" alt="Partially rendered skyline with broken lighting and geometry">](assets/captures/development-skyline.png) |
+
+[Replay details](docs/compatibility.md#scarlettmac-opening-cinematic) · [Development test results](docs/compatibility.md#recent-development-tests)
 
 ### XCL launch milestones
 
