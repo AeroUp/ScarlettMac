@@ -78,6 +78,18 @@ Three runs of XCL's synthetic test title returned 43, 44, and 43 passes out of 5
 | 41 | Sparse uploads | The first ring-buffer upload returned different bytes than expected. |
 | 46 | DirectStorage | The read did not signal the test's D3D12 fence. |
 
+## VIctory opening cinematic
+
+VIctory ran Xbox Series build 1.0.2.1 with the Series X device profile on an M3 Max with 48 GB of unified memory. The replay used CrossOver Preview and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
+
+| Stage | Capture | Observed on Mac |
+| --- | --- | --- |
+| World loading | [Frame 2340](../assets/captures/world-loading.png) | The loading artwork appeared while the game streamed assets for the opening scene. |
+| Opening title card | [Frame 2383](../assets/captures/opening-title-card.png) | The opening title appeared after the game moved past the loading artwork. |
+| Rendered 3D opening | [Frame 2421](../assets/captures/opening-cinematic.png) | The camera moved through several rendered shots, including the car and driver shown here. Visual artifacts remain. |
+
+The safety monitor ended the replay after 397.6 seconds when macOS reported memory pressure. Gameplay controls remain unverified.
+
 ## Mullion fallback
 
 Mullion v0.5-alpha.4 ran in a separate CrossOver bottle. It passed 48 of 50 synthetic checks and let the GPU read XCL's imported host memory directly. After fixes for command-list creation and console render-target descriptors, the title advanced to black offscreen captures through frame 290. A Metal GPU write fault then caused device removal. [Mullion release](https://github.com/dttdrv/mullion/releases/tag/v0.5-alpha.4)

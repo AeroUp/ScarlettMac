@@ -3,13 +3,24 @@
 [![macOS: Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-555555)](#tested-on-mac)
 [![Tested on M3 Max](https://img.shields.io/badge/Tested-M3%20Max-555555)](#tested-on-mac)
 [![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-555555)](#how-it-works)
-[![GTA VI: World loading](https://img.shields.io/badge/GTA%20VI-World%20loading-9a6700)](#gta-vi-status)
+[![XCL: World loading](https://img.shields.io/badge/XCL-World%20loading-9a6700)](#gta-vi-status)
+[![VIctory: 3D opening](https://img.shields.io/badge/VIctory-3D%20opening-238636)](#captured-on-mac)
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
 ## GTA VI status
 
-**GTA VI reaches world loading on the M3 Max. The next milestone is a visible 3D scene.**
+**GTA VI reaches world loading through XCL on the M3 Max. The VIctory test rendered the opening 3D cinematic. Gameplay controls remain unverified.**
+
+### Captured on Mac
+
+| World loading | Rendered 3D opening |
+| --- | --- |
+| [<img src="assets/captures/world-loading.png" width="360" alt="Illustrated GTA VI loading screen captured on an M3 Max">](assets/captures/world-loading.png) | [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) |
+
+Both images are offscreen captures from the same Xbox Series X replay on a MacBook Pro with an M3 Max. [Opening title card and test details](docs/compatibility.md#victory-opening-cinematic)
+
+### XCL launch milestones
 
 <picture>
   <source media="(max-width: 480px) and (prefers-color-scheme: dark)" srcset="assets/gta-launch-milestones-mobile-dark.svg">
