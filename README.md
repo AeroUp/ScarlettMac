@@ -3,7 +3,7 @@
 [![macOS: Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-0091FF)](#tested-on-mac)
 [![Tested on M3 Max](https://img.shields.io/badge/Tested-M3%20Max-5832A8)](#tested-on-mac)
 [![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-orange)](#how-it-works)
-[![XCL: World loading](https://img.shields.io/badge/XCL-World%20loading-9a6700)](#gta-vi-status)
+[![XCL: World loading](https://img.shields.io/badge/XCL-World%20loading-FFD700)](#gta-vi-status)
 [![VIctory: 3D opening](https://img.shields.io/badge/VIctory-3D%20opening-04a519)](#captured-on-mac)
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
