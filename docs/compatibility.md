@@ -20,6 +20,8 @@ Xbox Series build 1.0.2.1.
 
 The latest Series X replay captured a black frame after 150 seconds. GPU submissions continued and D3DMetal reported up to **16.8 GiB** of video memory.
 
+Selecting the main display plane restored the Series S account screen and loading artwork. The last visible capture showed that artwork at 182 seconds. The title’s GPU watchdog triggered at 217 seconds while a compute shader was still in preparation.
+
 | Measurement | Earlier | Later |
 | --- | ---: | ---: |
 | Shaders using fallback, same 723 variants | 88 | 4 |
@@ -42,7 +44,7 @@ The latest Series X replay captured a black frame after 150 seconds. GPU submiss
 | Guest semaphore publication | In the 20-pipeline run, five delayed guest values were written 21 to 145 ms after their native fences were observed complete. Submissions still stopped after those stores. | Check the later compute pipeline stalls. |
 | Late compute pipelines | Two compute pipelines that previously stalled world loading were ready before account selection. In the latest replay they built in 90 ms and 84 ms. The preload worker built all 22 selected pipelines before account selection. | Check other pipelines requested during the first world render. |
 | World-load memory | The earlier memory guard stopped the offscreen run at 169.2 seconds. The latest replay tracked 9,412 MiB of texture pages in use with no whole free texture heaps at its last memory sample. | Track texture residency through world loading. |
-| Series S profile | The title submitted two display planes. The earlier captures sampled its 1080p plane, which was black. | Check the other display plane for the startup image. |
+| Series S profile | The 1080p plane was black. Selecting the second, 4K plane restored account selection and world loading. The run logged 80,222 storage requests with zero reported failures. | Prepare the late compute pipeline observed at the final stall. |
 | macOS memory reporting | A title query treated about 255 GiB of reserved virtual address space as private usage. The corrected Series S query reported 5.6 GiB in use against an 8 GiB budget. An isolated CrossOver test verified reservation and resident-memory accounting. | Track usage during world loading. [Wine process counters](https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/ntdll/unix/process.c) |
 | Ray-tracing memory | In a synthetic D3DMetal test, a shader read both successive CPU writes through the coherent shadow. An opt-in build routed a 2,199 MiB retail allocation through the same path. The 194-second run logged the Rosetta float-to-half store error before GPU submissions stopped on loading artwork. | Test the replacement store during world loading. |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
