@@ -7,3 +7,5 @@ The BCPack decoder and generated tables come from [XCL PR #905](https://github.c
 The BCPack test vectors are synthetic and can be reproduced with the generator in the patch. The upstream `THIRD_PARTY.md` lists the original dependency notices.
 
 The optional Lanes patch contains changes to XCL only. TuxBox Lanes is independently available under the Apache License 2.0. [TuxBox license](https://github.com/brcly/TuxBox/blob/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/LICENSE)
+
+The standalone VIctory-macOS runtime preview carries its own GPL-3.0-or-later license and upstream notices. [Runtime source provenance](runtime-preview/SOURCE-NOTICES.md)

@@ -8,7 +8,7 @@
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
-[Build and run](#build-and-run) · [Compatibility results](docs/compatibility.md)
+[Build and run XCL](#build-and-run) · [Runtime preview](runtime-preview/BUILD.md) · [Compatibility results](docs/compatibility.md)
 
 ## Contribute
 
@@ -22,7 +22,7 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 
 **GTA VI reaches world loading through XCL on the M3 Max. Tests with a separate experimental runtime rendered the live 3D opening and verified pause and resume input.**
 
-The 3D opening ran below 1 FPS and showed severe rendering artifacts. Player movement and camera control remain unverified. The public build instructions cover the XCL runtime. [Development test results](docs/compatibility.md#recent-development-tests)
+The 3D opening ran below 1 FPS and showed severe rendering artifacts. Player movement and camera control remain unverified. These development tests used a local runtime configuration with additional patches. [Development test results](docs/compatibility.md#recent-development-tests)
 
 ### Captured on Mac
 
@@ -96,6 +96,10 @@ scripts/run.sh /path/to/unpacked/game.exe
 Set `SCARLETT_BOTTLE_DIR` to use a dedicated bottle in another location. Set `SCARLETT_OPUS_DLL` to an x64 `libopus-0.dll` to enable the Opus decoder. The launcher stores local data in the bottle under `C:\scarlett-lab-data` and runs with outbound IP traffic disabled.
 
 The repository distributes project source, patches, and launcher scripts. Supply your own unpacked game files. [Source provenance](SOURCE-NOTICES.md)
+
+## Runtime preview
+
+Build the independent VIctory-macOS runtime for CrossOver on Apple Silicon. The preview includes a configurable cap for recycled CPU snapshot buffers and an opt-in pixel shader interpolation fix. [Build and verify the runtime](runtime-preview/BUILD.md)
 
 ## Credits and license
 

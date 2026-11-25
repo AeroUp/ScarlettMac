@@ -1,0 +1,599 @@
+diff --git a/crates/victory-gpu/src/host.rs b/crates/victory-gpu/src/host.rs
+index a947b17a65e794625af3c49309511505f147ac71..c3f856b5c7615b6dd6eb42cf26f45da5a2b8a016 100644
+--- a/crates/victory-gpu/src/host.rs
++++ b/crates/victory-gpu/src/host.rs
+@@ -719,6 +719,23 @@ impl Host {
+         })
+     }
+ 
++    pub(crate) fn barycentrics(&self) -> bool {
++        static SUPPORTED: OnceLock<bool> = OnceLock::new();
++        *SUPPORTED.get_or_init(|| {
++            let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS3::default();
++            // SAFETY: the feature query writes the supplied options with the given size.
++            let supported = unsafe {
++                self.device.CheckFeatureSupport(
++                    D3D12_FEATURE_D3D12_OPTIONS3,
++                    (&raw mut options).cast(),
++                    size_of_val(&options) as u32,
++                )
++            }.is_ok() && options.BarycentricsSupported.as_bool();
++            tracing::info!(supported, "host pixel barycentrics capability");
++            supported
++        })
++    }
++
+     /// Whether the host runs 64-bit atomics on typed resources in the
+     /// descriptor heap (translated 64-bit image atomics); logged once.
+     pub(crate) fn heap_atomics64(&self) -> bool {
+diff --git a/crates/victory-gpu/src/pipeline/host.rs b/crates/victory-gpu/src/pipeline/host.rs
+index bbb2d9abc33f5ae32204b885316ebdade0772084..8d7d3c81128ab1904b4b11bb60cc0c53ba8d599f 100644
+--- a/crates/victory-gpu/src/pipeline/host.rs
++++ b/crates/victory-gpu/src/pipeline/host.rs
+@@ -356,28 +356,20 @@ impl HostPipeline {
+             s.translated()?;
+         }
+         let host = host()?;
+-        // `SFI0`: 64-bit atomics on typed resources and on heap resources.
+-        let atomics64 = stages.iter().any(|(s, _)| {
+-            let Some(t) = s.translated() else {
+-                return false;
+-            };
+-            victory_shader::Container::parse(&t.host.dxil)
+-                .ok()
+-                .and_then(|c| {
+-                    c.part(victory_shader::FourCC::SFI0)?
+-                        .data
+-                        .get(..4)?
+-                        .try_into()
+-                        .ok()
+-                })
+-                .is_some_and(|b: [u8; 4]| u32::from_le_bytes(b) & 0x1040_0000 != 0)
+-        });
+-        if atomics64 && !host.heap_atomics64() {
++        let features = stages.iter().filter_map(|(s, _)| {
++            let dxil = victory_shader::Container::parse(&s.translated()?.host.dxil).ok()?;
++            let data = dxil.part(victory_shader::FourCC::SFI0)?.data;
++            Some(u64::from_le_bytes(data.get(..8)?.try_into().ok()?))
++        }).fold(0, |a, b| a | b);
++        if features & 0x1040_0000 != 0 && !host.heap_atomics64() {
+             return refuse(
+                 "the host GPU has no 64-bit atomics on typed heap resources",
+                 shaders,
+             );
+         }
++        if features & victory_shader::emit::SFI0_BARYCENTRICS != 0 && !host.barycentrics() {
++            return refuse("the host GPU has no pixel barycentrics", shaders);
++        }
+ 
+         let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS19::default();
+         // SAFETY: the feature query writes the structure of the given size.
+diff --git a/crates/victory-gpu/src/shader_cache.rs b/crates/victory-gpu/src/shader_cache.rs
+index b4d9d055bf46c4d6101f7366e3a40c3b9489baa7..66a6a30bb6e1851d4a67b601e3530ea2bd01bd56 100644
+--- a/crates/victory-gpu/src/shader_cache.rs
++++ b/crates/victory-gpu/src/shader_cache.rs
+@@ -16,7 +16,7 @@
+ //! of the key, so changing the encoding invalidates every entry.
+ 
+ use std::path::PathBuf;
+-use std::sync::OnceLock;
++use std::sync::{LazyLock, OnceLock};
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+ 
+ use victory_pipeline::{Cache, Converter};
+@@ -127,9 +127,12 @@ pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
+     // (`crate::shadow::copy_back_marks`).
+     // Under Wine (D3DMetal), 64-bit image atomics run under locks: its own
+     // leave the texels untouched (`emit`, "Atomic locks").
++    static DIRECT_BARYCENTRICS: LazyLock<bool> =
++        LazyLock::new(|| std::env::var("VICTORY_DIRECT_BARYCENTRICS").as_deref() == Ok("1"));
+     let options = victory_shader::emit::Options {
+         view_marks: true,
+         atomic_locks: atomic_locks(),
++        direct_barycentrics: *DIRECT_BARYCENTRICS,
+     };
+     let translate =
+         |c: &[u8]| victory_shader::emit::translate_with(c, options).map_err(|e| e.to_string());
+@@ -138,6 +141,17 @@ pub fn host_shader(container: &[u8]) -> (Result<HostShader, String>, bool) {
+     } else {
+         build()
+     };
++    let build = if options.direct_barycentrics {
++        static DIRECT_BUILD: OnceLock<[u8; 32]> = OnceLock::new();
++        DIRECT_BUILD.get_or_init(|| {
++            let mut h = blake3::Hasher::new();
++            h.update(build);
++            h.update(b"direct center barycentrics");
++            *h.finalize().as_bytes()
++        })
++    } else {
++        build
++    };
+     match CACHE.get() {
+         Some(cache) => cached(cache, build, container, translate),
+         None => (translate(container), false),
+diff --git a/crates/victory-shader/src/emit/container.rs b/crates/victory-shader/src/emit/container.rs
+index 3f0de1ace06ec430210d5fd3d368c9c15c7fb209..45b2b8a7cf54e2ec99e4e816183d7ff788b3bdea 100644
+--- a/crates/victory-shader/src/emit/container.rs
++++ b/crates/victory-shader/src/emit/container.rs
+@@ -44,6 +44,7 @@ impl SigElement {
+             18 => 68,
+             19 => 67,
+             20 => 69,
++            28 => 23,
+             30 => 25, // cull primitive
+             _ => 0,
+         }
+diff --git a/crates/victory-shader/src/emit/lower.rs b/crates/victory-shader/src/emit/lower.rs
+index fb912bb0bde1edc24014b8dea8d4908fca407235..56e0976ecddf08a797691f8e0c4f946a7180016b 100644
+--- a/crates/victory-shader/src/emit/lower.rs
++++ b/crates/victory-shader/src/emit/lower.rs
+@@ -88,10 +88,23 @@ enum Stop {
+     Fail(ShaderError),
+ }
+ 
++const DIRECT_BARYCENTRICS: Why = "barycentrics read directly";
++
+ pub(crate) fn lower(parts: &Parts) -> Result<Lowered, ShaderError> {
++    lower_with(parts, false)
++}
++
++pub(crate) fn lower_direct_barycentrics(parts: &Parts) -> Result<Lowered, ShaderError> {
++    match lower(parts) {
++        Err(ShaderError::Unsupported { what: DIRECT_BARYCENTRICS, .. }) => lower_with(parts, true),
++        result => result,
++    }
++}
++
++fn lower_with(parts: &Parts, direct_barycentrics: bool) -> Result<Lowered, ShaderError> {
+     let mut bad = HashMap::new();
+     loop {
+-        match Lower::new(parts, &bad).run() {
++        match Lower::new(parts, &bad, direct_barycentrics).run() {
+             Ok(l) => return Ok(l),
+             Err(Stop::Retry(v, why)) => {
+                 if bad.insert(v, why).is_some() {
+@@ -175,6 +188,8 @@ struct Lower<'a> {
+     s: Shader,
+     x: &'a Parts<'a>,
+     bad: &'a HashMap<Value, Why>,
++    direct_barycentrics: bool,
++    perspective_barycentric_guard: Option<V>,
+     lane_fail: HashMap<Value, Why>,
+     vals: HashMap<Value, Val>,
+     floats: HashMap<Value, V>,
+@@ -471,7 +486,7 @@ fn smem_dwords(name: &str) -> Option<u32> {
+ }
+ 
+ impl<'a> Lower<'a> {
+-    fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>) -> Self {
++    fn new(x: &'a Parts<'a>, bad: &'a HashMap<Value, Why>, direct_barycentrics: bool) -> Self {
+         let p = x.p;
+         let mut phi_at = HashMap::new();
+         for (b, block) in p.blocks.iter().enumerate() {
+@@ -583,6 +598,8 @@ impl<'a> Lower<'a> {
+             s,
+             x,
+             bad,
++            direct_barycentrics,
++            perspective_barycentric_guard: None,
+             lane_fail: HashMap::new(),
+             vals: HashMap::new(),
+             floats: HashMap::new(),
+@@ -1382,6 +1399,7 @@ impl<'a> Lower<'a> {
+                 },
+                 Reg::Scc => Val::Missing("SCC on entry"),
+                 Reg::V(_) => match io_inputs.get(&v) {
++                    Some(Input::Barycentric { .. }) if self.direct_barycentrics => continue,
+                     Some(&input) => self.input(input),
+                     // Registers no one set read as zero (the validator
+                     // refuses reads of undef).
+@@ -1404,7 +1422,7 @@ impl<'a> Lower<'a> {
+                     None => Val::Missing("a vertex input the signature lacks"),
+                 };
+             }
+-            Input::Barycentric { .. } => return Val::Missing("barycentrics read directly"),
++            Input::Barycentric { .. } => return Val::Missing(DIRECT_BARYCENTRICS),
+             Input::PrimitiveId => return Val::Missing("the primitive id"),
+             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
+             // host's value can be.
+@@ -1503,6 +1521,121 @@ impl<'a> Lower<'a> {
+         self.load_any_input(id, col)
+     }
+ 
++    fn load_direct_barycentric(&mut self, value: Value) -> bool {
++        if !self.direct_barycentrics {
++            return false;
++        }
++        let Some(&(_, Input::Barycentric { kind, index })) =
++            self.x.io.inputs.iter().find(|&&(v, _)| v == value)
++        else {
++            return false;
++        };
++        let mode = match kind {
++            Barycentric::PerspectiveCenter => 2,
++            Barycentric::LinearCenter => 4,
++            _ => {
++                self.vals.insert(value, Val::Missing("direct barycentrics outside pixel center"));
++                return true;
++            }
++        };
++        let guard = if kind == Barycentric::PerspectiveCenter {
++            let Some(guard) = self.perspective_barycentric_guard() else {
++                self.vals.insert(
++                    value,
++                    Val::Missing("perspective barycentrics need a float SV_Position"),
++                );
++                return true;
++            };
++            Some(guard)
++        } else {
++            None
++        };
++        let id = self.s.inputs.iter().position(|e| e.kind == 28 && e.interp == mode).unwrap_or_else(|| {
++            let id = self.s.inputs.len();
++            let index = self.s.inputs.iter().filter(|e| e.kind == 28).count() as u32;
++            self.s.inputs.push(SigElement {
++                name: "SV_Barycentrics".into(),
++                index,
++                kind: 28,
++                comp: 9,
++                interp: mode,
++                row: None,
++                col: 0,
++                cols: 3,
++                usage: 0,
++                half: false,
++            });
++            self.s.flags |= flags::BARYCENTRICS;
++            id
++        });
++        let Val::I32(weight) = self.load_any_input(id, index + 1) else {
++            unreachable!()
++        };
++        let weight = match guard {
++            Some(valid) => {
++                let zero = self.s.m.i32(0);
++                self.s.m.select(self.s.entry, valid, weight, zero)
++            }
++            None => weight,
++        };
++        self.vals.insert(value, Val::I32(weight));
++        true
++    }
++
++    fn perspective_barycentric_guard(&mut self) -> Option<V> {
++        if let Some(valid) = self.perspective_barycentric_guard {
++            return Some(valid);
++        }
++        let next_row = || self.s.inputs.iter().filter_map(|e| e.row).max().map_or(0, |row| row + 1);
++        let id = match self.s.inputs.iter().position(|e| e.kind == 3) {
++            Some(id) => {
++                let e = &self.s.inputs[id];
++                if e.comp != 9 || e.half {
++                    return None;
++                }
++                if e.row.is_none() || e.col + e.cols < 4 {
++                    let row = next_row();
++                    let e = &mut self.s.inputs[id];
++                    e.row = Some(row);
++                    e.cols = 4 - e.col;
++                }
++                id
++            }
++            None => {
++                let id = self.s.inputs.len();
++                let row = next_row();
++                let conservative = self.s.outputs.iter().any(|e| matches!(e.kind, 18 | 19));
++                self.s.inputs.push(SigElement {
++                    name: "SV_Position".into(),
++                    index: 0,
++                    kind: 3,
++                    comp: 9,
++                    interp: if conservative { 5 } else { 4 },
++                    row: Some(row),
++                    col: 0,
++                    cols: 4,
++                    usage: 0,
++                    half: false,
++                });
++                id
++            }
++        };
++        let Val::I32(w) = self.load_any_input(id, 3 - self.s.inputs[id].col) else {
++            unreachable!()
++        };
++        // D3DMetal requires live position W to normalize perspective barycentrics.
++        let entry = self.s.entry;
++        let signless = self.s.m.i32(0x7fff_ffff);
++        let infinity = self.s.m.i32(f32::INFINITY.to_bits());
++        let zero = self.s.m.i32(0);
++        let magnitude = self.s.m.bin(entry, Bin::And, w, signless);
++        let nonzero = self.s.m.cmp(entry, pred::NE, magnitude, zero);
++        let finite = self.s.m.cmp(entry, pred::IULT, magnitude, infinity);
++        let valid = self.s.m.bin(entry, Bin::And, nonzero, finite);
++        self.perspective_barycentric_guard = Some(valid);
++        Some(valid)
++    }
++
+     /// An input element's channel as declared (16-bit ones as 32-bit floats).
+     fn load_any_input(&mut self, id: usize, col: u8) -> Val {
+         let e = &mut self.s.inputs[id];
+@@ -1566,6 +1699,9 @@ impl<'a> Lower<'a> {
+             self.vals.insert(v, val);
+             return Ok(val);
+         }
++        if self.load_direct_barycentric(v) {
++            return self.get(v);
++        }
+         Err("a value defined after its use")
+     }
+ 
+@@ -10055,6 +10191,9 @@ impl<'a> Lower<'a> {
+                 let qb = self.edges.get(&(q, b)).copied().unwrap_or(qb);
+                 let arg = phi.args[n];
+                 let read = live.contains(&(phi.value, n));
++                if read && !self.vals.contains_key(&arg) {
++                    self.load_direct_barycentric(arg);
++                }
+                 let x = match (self.vals.get(&arg).copied(), bit) {
+                     (Some(Val::I32(x)), false) | (Some(Val::Bit(x)), true) => x,
+                     // No lane from this edge reads it, or no lane comes
+diff --git a/crates/victory-shader/src/emit/mod.rs b/crates/victory-shader/src/emit/mod.rs
+index 62a1322ea38b032dfc36e6e5c2ef663bce9977b8..0477bc7923c7ed553d694a542232c0f009a9982f 100644
+--- a/crates/victory-shader/src/emit/mod.rs
++++ b/crates/victory-shader/src/emit/mod.rs
+@@ -227,6 +227,8 @@ use crate::dxbc::{Container, FourCC};
+ use crate::native::{HwStage, NativeProgram, RootType};
+ use crate::{ShaderError, io, ir, resource, structure};
+ 
++pub const SFI0_BARYCENTRICS: u64 = 0x2_0000;
++
+ pub use sampler::StaticSampler;
+ pub use shader::{
+     HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
+@@ -372,6 +374,7 @@ pub struct Options {
+     /// stores (module notes, "Atomic locks"), for hosts that claim the
+     /// 64-bit atomics and leave the texels untouched (D3DMetal).
+     pub atomic_locks: bool,
++    pub direct_barycentrics: bool,
+ }
+ 
+ /// Translates the vertex, pixel, compute or mesh program of a console
+@@ -438,6 +441,12 @@ pub fn emit_with(
+     };
+     let pixel = native.stage == HwStage::Ps;
+     let mut inputs = sig(FourCC::ISG1)?;
++    if pixel && inputs.iter().any(|e| e.kind == 28) {
++        if !options.direct_barycentrics {
++            return Err(ShaderError::Unsupported { offset: 0, what: "a system value in the signature" });
++        }
++        inputs.retain(|e| e.kind != 28);
++    }
+     let mut outputs = sig(FourCC::OSG1)?;
+     // Interpolation as DXC declares it by default; pixel inputs that are
+     // read get the mode their barycentrics say.
+@@ -498,14 +507,21 @@ pub fn emit_with(
+         view_marks: options.view_marks,
+         atomic_locks: options.atomic_locks,
+     };
+-    let l = match lower::lower(&parts(st, res)) {
++    let lower = |parts: &lower::Parts| {
++        if options.direct_barycentrics {
++            lower::lower_direct_barycentrics(parts)
++        } else {
++            lower::lower(parts)
++        }
++    };
++    let l = match lower(&parts(st, res)) {
+         // Discarded lanes kept on as helpers can read what no surviving
+         // lane does (a register only killed lanes skipped writing); such a
+         // program kills them as the console does (`structure::killing`).
+         Err(_) if !st.discards.is_empty() => {
+             let st = structure::killing(p)?;
+             let res = resource::track(p, &native.layout, native.stage, Some(&st))?;
+-            lower::lower(&parts(&st, &res))?
++            lower(&parts(&st, &res))?
+         }
+         l => l?,
+     };
+@@ -585,6 +601,7 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
+             68 => 18,
+             69 => 20,
+             70 => 15,
++            23 => 28,
+             25 => 30, // cull primitive
+             _ => {
+                 return Err(ShaderError::Unsupported {
+@@ -1223,6 +1240,17 @@ mod tests {
+         input_addr: u32,
+         isg1: &[u8],
+         osg1: &[u8],
++    ) -> Result<HostShader, ShaderError> {
++        emit_pixel_with_options(words, inputs, input_addr, isg1, osg1, super::Options::default())
++    }
++
++    fn emit_pixel_with_options(
++        words: &[u32],
++        inputs: Vec<crate::native::PsInput>,
++        input_addr: u32,
++        isg1: &[u8],
++        osg1: &[u8],
++        options: super::Options,
+     ) -> Result<HostShader, ShaderError> {
+         let native = super::NativeProgram {
+             stage: super::HwStage::Ps,
+@@ -1244,7 +1272,7 @@ mod tests {
+         let st = structure::structure(&p).unwrap();
+         let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
+         let io = io::raise(&p, &native)?;
+-        let out = emit(&c, &native, &p, &st, &io, &res)?;
++        let out = super::emit_with(&c, &native, &p, &st, &io, &res, options)?;
+         // dxil.dll, where there is one, checks the module.
+         #[cfg(windows)]
+         if let Ok(mut v) = super::validator::Validator::load(
+@@ -1255,6 +1283,142 @@ mod tests {
+         Ok(out)
+     }
+ 
++    #[test]
++    fn direct_pixel_center_barycentrics_are_unpacked_y_and_z() {
++        let isg1 = container::signature(&[], true);
++        let osg1 = rows(&[("SV_Target", 16, false)], false);
++        let weights = [0xF800_180F, 0x0100_0100, 0xBF81_0000];
++        let options = super::Options { direct_barycentrics: true, ..Default::default() };
++        let e = emit_pixel(&weights, vec![], 1 << 1, &isg1, &osg1).unwrap_err();
++        assert!(e.to_string().contains("barycentrics read directly"), "{e}");
++        for (input_addr, perspective) in [(1 << 1, true), (1 << 5, false)] {
++            let ps = emit_pixel_with_options(&weights, vec![], input_addr, &isg1, &osg1, options)
++                .expect("center weights translate");
++            let dxil = Container::parse(&ps.dxil).unwrap();
++            let input = dxil.part(FourCC::ISG1).unwrap().data;
++            let word = |start: usize| u32::from_le_bytes(input[start..start + 4].try_into().unwrap());
++            assert_eq!(word(0), 1 + u32::from(perspective));
++            let barycentric = if perspective {
++                assert_eq!(word(20), 1);
++                assert_eq!(word(28), 0);
++                assert_eq!((input[32], input[33]), (0b1111, 0b1000));
++                32
++            } else {
++                0
++            };
++            assert_eq!(word(barycentric + 20), 23);
++            assert_eq!(word(barycentric + 28), u32::MAX);
++            assert_eq!((input[barycentric + 32], input[barycentric + 33]), (0b111, 0b110));
++            let flags = dxil.part(FourCC::SFI0).unwrap().data;
++            assert_ne!(u64::from_le_bytes(flags.try_into().unwrap()) & super::SFI0_BARYCENTRICS, 0);
++        }
++        let e = emit_pixel_with_options(&weights, vec![], 1 << 2, &isg1, &osg1, options).unwrap_err();
++        assert!(e.to_string().contains("outside pixel center"), "{e}");
++
++        let constant = [0x7E04_0280, 0xF800_180F, 0x0202_0202, 0xBF81_0000];
++        let baseline = emit_pixel(&constant, vec![], 1 << 1, &isg1, &osg1).unwrap();
++        let retry = emit_pixel_with_options(&constant, vec![], 1 << 1, &isg1, &osg1, options).unwrap();
++        assert_eq!(baseline.dxil, retry.dxil);
++    }
++
++    #[cfg(windows)]
++    #[test]
++    #[ignore = "requires native pixel barycentrics on a D3D12 hardware adapter"]
++    fn direct_pixel_center_barycentrics_draws_native_triangle() {
++        use super::bitcode::Term;
++        use super::host::{Draw, Host, Root};
++        use windows::Win32::Graphics::Direct3D12::*;
++
++        let host = Host::new(false).expect("a hardware D3D12 adapter");
++        let mut caps = D3D12_FEATURE_DATA_D3D12_OPTIONS3::default();
++        // SAFETY: the feature query writes only the supplied options structure.
++        unsafe {
++            host.device.CheckFeatureSupport(
++                D3D12_FEATURE_D3D12_OPTIONS3,
++                (&raw mut caps).cast(),
++                size_of_val(&caps) as u32,
++            )
++        }.expect("OPTIONS3");
++        assert!(caps.BarycentricsSupported.as_bool(), "adapter lacks pixel barycentrics");
++
++        let mut s = super::shader::Shader::new(false);
++        let input = SigElement {
++            name: "POSITION".into(), index: 0, kind: 0, comp: 9, interp: 0,
++            row: Some(0), col: 0, cols: 4, usage: 15, half: false,
++        };
++        s.inputs.push(input.clone());
++        s.outputs.push(SigElement { name: "SV_Position".into(), kind: 3, interp: 4, ..input });
++        let entry = s.entry;
++        for channel in 0..4 {
++            let args = [s.m.i32(0), s.m.i32(0), s.m.i8(channel), s.m.undef(s.t.i32)];
++            let x = s.op(entry, "loadInput.f32", Attr::ReadNone, s.t.f32, 4, &args);
++            let args = [s.m.i32(0), s.m.i32(0), s.m.i8(channel), x];
++            s.op(entry, "storeOutput.f32", Attr::NoUnwind, s.t.void, 5, &args);
++        }
++        s.m.terminate(entry, Term::Ret);
++        let vertex_dxil = s.finish();
++
++        const SIZE: u32 = 32;
++        let ndc = [[-0.8f32, -0.7], [0.9, -0.6], [-0.5, 0.85]];
++        let w = [1.0f32, 2.0, 4.0];
++        let vertices: Vec<f32> = ndc.iter().zip(w)
++            .flat_map(|([x, y], w)| [x * w, y * w, 0.5 * w, w]).collect();
++        let draw = Draw {
++            roots: vec![(0, Root::Constants(vec![0])), (1, Root::Constants(vec![0]))],
++            textures: &[],
++            samplers: &[],
++            vertices: &vertices,
++            stride: 16,
++            size: (SIZE, SIZE),
++            mesh_groups: 0,
++        };
++        let isg1 = container::signature(&[], true);
++        let osg1 = rows(&[("SV_Target", 16, false)], false);
++        let words = [0x0804_00F2, 0x0804_0302, 0x7E06_02F2, 0xF800_180F, 0x0301_0002, 0xBF81_0000];
++        let options = super::Options { direct_barycentrics: true, ..Default::default() };
++        let sub = |a: [f32; 2], b: [f32; 2]| [a[0] - b[0], a[1] - b[1]];
++        let cross = |a: [f32; 2], b: [f32; 2]| a[0] * b[1] - a[1] * b[0];
++        let (e1, e2) = (sub(ndc[1], ndc[0]), sub(ndc[2], ndc[0]));
++        let area = cross(e1, e2);
++
++        for (mode, input, perspective) in [("screen-linear", 1 << 5, false), ("perspective", 1 << 1, true)] {
++            let ps = emit_pixel_with_options(&words, vec![], input, &isg1, &osg1, options)
++                .expect("translate the barycentric pixel shader");
++            let vs = HostShader { dxil: vertex_dxil.clone(), ..super::host::stub_vs(&ps).unwrap() };
++            let (root, pso) = host.pipeline(&vs, &ps).unwrap_or_else(|e| panic!("{mode} PSO: {e}"));
++            let pixels = host.draw(&root, &pso, &draw).unwrap_or_else(|e| panic!("{mode} draw: {e}"));
++            let mut checked = 0;
++            for y in 0..SIZE {
++                for x in 0..SIZE {
++                    let scale = 2.0 / SIZE as f32;
++                    let p = [(x as f32 + 0.5) * scale - 1.0, 1.0 - (y as f32 + 0.5) * scale];
++                    let d = sub(p, ndc[0]);
++                    let (i, j) = (cross(d, e2) / area, cross(e1, d) / area);
++                    let linear = [1.0 - i - j, i, j];
++                    if linear.iter().any(|&value| value < 0.02) {
++                        continue;
++                    }
++                    let q = [linear[0] / w[0], linear[1] / w[1], linear[2] / w[2]];
++                    let expected = if perspective {
++                        let sum: f32 = q.iter().sum();
++                        q.map(|weight| weight / sum)
++                    } else {
++                        linear
++                    };
++                    let actual = pixels[(y * SIZE + x) as usize];
++                    assert!(
++                        actual[..3].iter().zip(expected).all(|(&a, e)| (a - e).abs() < 2e-3)
++                            && actual[3] == 1.0,
++                        "{mode} ({x},{y}): actual {actual:?}, expected {expected:?}",
++                    );
++                    checked += 1;
++                }
++            }
++            assert!(checked > 100);
++            println!("{mode} native PSO and fence readback match at {checked} interior pixels");
++        }
++    }
++
+     /// A float4 element per row (16-bit ones declared so in the part).
+     fn rows(elements: &[(&str, u8, bool)], input: bool) -> Vec<u8> {
+         let els: Vec<SigElement> = elements
+diff --git a/crates/victory-shader/src/emit/shader.rs b/crates/victory-shader/src/emit/shader.rs
+index ea8ef76e43dedf9df9683f093fa5244ab9f8f5d1..ac9a98f34b2b5cb8450c902e7cb3cb5e7afdb612 100644
+--- a/crates/victory-shader/src/emit/shader.rs
++++ b/crates/victory-shader/src/emit/shader.rs
+@@ -55,6 +55,7 @@ pub(crate) mod flags {
+     pub const ROVS: u64 = 1 << 18;
+     pub const WAVE_OPS: u64 = 1 << 19;
+     pub const INT64: u64 = 1 << 20;
++    pub const BARYCENTRICS: u64 = 1 << 22;
+     pub const ATOMIC64_TYPED: u64 = 1 << 27;
+     pub const RESOURCE_HEAP: u64 = 1 << 30;
+     pub const SAMPLER_HEAP: u64 = 1 << 31;
+@@ -903,6 +904,9 @@ impl Shader {
+         if self.flags & flags::INT64 != 0 {
+             features |= 0x8000;
+         }
++        if self.flags & flags::BARYCENTRICS != 0 {
++            features |= super::SFI0_BARYCENTRICS;
++        }
+         if self.flags & flags::RESOURCE_HEAP != 0 {
+             features |= 0x200_0000;
+         }

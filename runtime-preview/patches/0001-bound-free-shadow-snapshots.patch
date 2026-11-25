@@ -1,0 +1,201 @@
+diff --git a/crates/victory-gpu/src/lib.rs b/crates/victory-gpu/src/lib.rs
+index dcac347..9207549 100644
+--- a/crates/victory-gpu/src/lib.rs
++++ b/crates/victory-gpu/src/lib.rs
+@@ -59,6 +59,8 @@ pub mod shader_cache;
+ #[cfg(windows)]
+ mod shadow;
+ pub mod signature;
++#[cfg(any(windows, test))]
++mod snapshot_pool;
+ mod switch;
+ #[cfg(windows)]
+ mod tdr;
+diff --git a/crates/victory-gpu/src/shadow.rs b/crates/victory-gpu/src/shadow.rs
+index 78bb98e..e044a84 100644
+--- a/crates/victory-gpu/src/shadow.rs
++++ b/crates/victory-gpu/src/shadow.rs
+@@ -17,11 +17,12 @@
+ //! (`crate::bindless`).
+ 
+ use std::collections::BTreeMap;
+-use std::sync::{Arc, Mutex};
++use std::sync::{Arc, LazyLock, Mutex};
+ 
+ use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
+ 
+ use crate::host::{HostList, host};
++use crate::snapshot_pool::{SnapshotPool, limit_bytes};
+ use crate::watch::PAGE;
+ 
+ /// A title buffer's host copy.
+@@ -51,43 +52,21 @@ pub(crate) struct Shadow {
+ /// Snapshot segments (offset, bytes) and the pieces compared.
+ type Snapshot = (Vec<(usize, Vec<u8>)>, std::collections::HashSet<usize>);
+ 
+-/// Snapshot memory kept for reuse (already touched, so no page faults).
+-static POOL: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
++static POOL: Mutex<SnapshotPool> = Mutex::new(SnapshotPool::new());
++static POOL_LIMIT: LazyLock<usize> =
++    LazyLock::new(|| limit_bytes(std::env::var("VICTORY_SNAPSHOT_POOL_MIB").ok().as_deref()));
+ 
+ /// An empty buffer with room for `n` bytes, from the pool if it has one.
+ fn pooled(n: usize) -> Vec<u8> {
+-    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+-    let fit = pool
+-        .iter()
+-        .enumerate()
+-        .filter(|(_, v)| v.capacity() >= n)
+-        .min_by_key(|(_, v)| v.capacity())
+-        .map(|(i, _)| i);
+-    let mut v = match fit {
+-        Some(i) => pool.swap_remove(i),
+-        None => Vec::with_capacity(n),
+-    };
+-    v.clear();
+-    v
++    POOL.lock().unwrap_or_else(|e| e.into_inner()).take(n)
+ }
+ 
+-/// Returns a snapshot buffer to the pool, which keeps the largest up to
+-/// [`POOL_BYTES`] in all: a world submission snapshots several copies, and
+-/// fresh buffers cost a page fault per 4 KiB touched (millions per frame).
+ fn give_back(v: Vec<u8>) {
+-    let mut pool = POOL.lock().unwrap_or_else(|e| e.into_inner());
+-    pool.push(v);
+-    pool.sort_by_key(|v| std::cmp::Reverse(v.capacity()));
+-    let mut total = 0;
+-    pool.retain(|v| {
+-        total += v.capacity();
+-        total <= POOL_BYTES
+-    });
++    POOL.lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .recycle(v, *POOL_LIMIT);
+ }
+ 
+-/// Snapshot memory kept for reuse.
+-const POOL_BYTES: usize = 2 << 30;
+-
+ // SAFETY: D3D12 resources are free-threaded; `data` is a persistent mapping
+ // written only on the submitting thread.
+ unsafe impl Send for Shadow {}
+@@ -928,6 +907,12 @@ static VIEWS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::At
+ #[cfg(feature = "diagnostics")]
+ pub(crate) fn log_views(frames: f64) {
+     use std::sync::atomic::Ordering::Relaxed;
++    let retained = POOL.lock().unwrap_or_else(|e| e.into_inner()).retained_bytes();
++    tracing::info!(
++        retained_bytes = retained,
++        limit_bytes = *POOL_LIMIT,
++        "free shadow snapshot pool"
++    );
+     let [asks, made, bytes, largest] = [0, 1, 2, 3].map(|i| VIEWS[i].swap(0, Relaxed));
+     let live = EXACT
+         .lock()
+diff --git a/crates/victory-gpu/src/snapshot_pool.rs b/crates/victory-gpu/src/snapshot_pool.rs
+new file mode 100644
+index 0000000..f0b59ce
+--- /dev/null
++++ b/crates/victory-gpu/src/snapshot_pool.rs
+@@ -0,0 +1,100 @@
++const MIB: usize = 1 << 20;
++const DEFAULT_MIB: usize = 2048;
++
++pub(crate) fn limit_bytes(value: Option<&str>) -> usize {
++    value
++        .and_then(|value| value.parse::<usize>().ok())
++        .filter(|&mib| mib <= DEFAULT_MIB)
++        .unwrap_or(DEFAULT_MIB)
++        * MIB
++}
++
++pub(crate) struct SnapshotPool {
++    buffers: Vec<Vec<u8>>,
++}
++
++impl SnapshotPool {
++    pub(crate) const fn new() -> Self {
++        Self {
++            buffers: Vec::new(),
++        }
++    }
++
++    pub(crate) fn take(&mut self, size: usize) -> Vec<u8> {
++        let index = self
++            .buffers
++            .iter()
++            .enumerate()
++            .filter(|(_, bytes)| bytes.capacity() >= size)
++            .min_by_key(|(_, bytes)| bytes.capacity())
++            .map(|(index, _)| index);
++        let mut bytes =
++            index.map_or_else(|| Vec::with_capacity(size), |i| self.buffers.swap_remove(i));
++        bytes.clear();
++        bytes
++    }
++
++    pub(crate) fn recycle(&mut self, bytes: Vec<u8>, limit: usize) {
++        if limit < DEFAULT_MIB * MIB && (limit == 0 || bytes.capacity() > limit) {
++            return;
++        }
++        self.buffers.push(bytes);
++        self.buffers
++            .sort_by_key(|bytes| std::cmp::Reverse(bytes.capacity()));
++        let mut retained = 0usize;
++        let keep = self
++            .buffers
++            .iter()
++            .take_while(|bytes| {
++                retained = retained.saturating_add(bytes.capacity());
++                retained <= limit
++            })
++            .count();
++        self.buffers.truncate(keep);
++    }
++
++    #[cfg(any(feature = "diagnostics", test))]
++    pub(crate) fn retained_bytes(&self) -> usize {
++        self.buffers.iter().map(Vec::capacity).sum()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_mib_or_retains_the_default() {
++        assert_eq!(limit_bytes(None), 2048 * MIB);
++        assert_eq!(limit_bytes(Some("256")), 256 * MIB);
++        assert_eq!(limit_bytes(Some("0")), 0);
++        assert_eq!(limit_bytes(Some("2049")), 2048 * MIB);
++        assert_eq!(limit_bytes(Some("-1")), 2048 * MIB);
++    }
++
++    #[test]
++    fn caps_free_buffers_and_allows_larger_active_snapshots() {
++        let mut pool = SnapshotPool::new();
++        let small = Vec::with_capacity(32);
++        let large = Vec::with_capacity(64);
++        let (small_capacity, large_capacity) = (small.capacity(), large.capacity());
++        let limit = small_capacity + large_capacity;
++        pool.recycle(small, limit);
++        pool.recycle(large, limit);
++
++        let active = pool.take(limit + 1);
++        assert!(active.capacity() > limit);
++        pool.recycle(active, limit);
++        assert_eq!(pool.retained_bytes(), limit);
++
++        let reused = pool.take(small_capacity);
++        assert!(reused.is_empty());
++        assert_eq!(reused.capacity(), small_capacity);
++        pool.recycle(Vec::with_capacity(large_capacity), limit);
++        assert_eq!(pool.retained_bytes(), large_capacity);
++
++        let mut disabled = SnapshotPool::new();
++        disabled.recycle(reused, 0);
++        assert_eq!(disabled.retained_bytes(), 0);
++    }
++}
