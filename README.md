@@ -1,40 +1,40 @@
-![ScarlettMac. Xbox Series X|S on Apple Silicon.](assets/scarlettmac-wordmark.png)
+# ScarlettMac
 
-**ScarlettMac** runs Xbox Series X|S game code locally on Apple Silicon through CrossOver Preview and D3DMetal. It builds on [XCL](https://github.com/xcl-dev/xcl).
+Xbox Series X|S compatibility research for Apple Silicon, built on [XCL](https://github.com/xcl-dev/xcl).
 
-[GTA VI status](#gta-vi-status) · [Mac test coverage](#verified-on-mac) · [Current work](#current-work) · [Build and run](#build-and-run)
+> [!NOTE]
+> GTA VI boots offline, shows the intro and menus, and starts loading the world. The first playable scene is still unverified.
 
-## GTA VI status
+[How it works](#how-it-works) · [What works on Mac](#what-works-on-mac) · [GTA VI status](#gta-vi-status) · [Build and run](#build-and-run)
 
-**GTA VI reaches the menus and starts loading the world on Mac. The first playable scene is still unverified.** This status is for Xbox Series build 1.0.2.1 on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3.
+## How it works
 
-![GTA VI on Mac. Offline boot, intro and menus are verified. World loading is the furthest verified stage. The first 3D scene, gameplay controls and first mission are open.](assets/gta-launch-progress.png)
+```mermaid
+flowchart LR
+    Game["Xbox Series game files"] --> XCL["ScarlettMac / XCL"]
+    XCL --> |Game code| CPU["Rosetta 2"]
+    XCL --> |Recompiled shaders| GPU["D3DMetal"]
+    CPU --> Mac["Apple Silicon"]
+    GPU --> Mac
+```
+
+CrossOver runs the Windows x64 runtime on macOS. XCL supplies the Xbox system APIs and recompiles console GPU shaders to DXIL for D3DMetal.
+
+## What works on Mac
+
+Latest measurements used an Apple M3 Max, CrossOver Preview 27.0.0.41073, and D3DMetal 4.0b3.
+
+| Test | Observed result |
+| --- | --- |
+| Offline Xbox runtime | Boots the Xbox Series version of GTA VI from local files. |
+| Graphics and frame output | 11 of 11 checks passed in each synthetic test run. |
+| Full Xbox system fixture | 43 of 50 checks passed all three runs. One varied and six failed all three. |
+| TuxBox Lanes | Completed the scripted game replay with input, collisions, and rendered-board checks. |
 
 <details>
-<summary>See all seven launch stages</summary>
+<summary>Open fixture checks and reproduction</summary>
 
-| Milestone | Status | Observed on Mac |
-| --- | --- | --- |
-| Offline boot | Verified | The Xbox Series executable starts offline. |
-| Intro | Verified | The opening graphics render. |
-| Setup and menus | Verified | Controller input works through setup. Menus render at about 30 FPS. |
-| World loader | Verified | Controller input from the menu starts world loading. The game draws loading artwork and reads world assets. |
-| Live 3D scene | Open | The loading artwork gave way to a black frame in an offscreen capture with no window or swapchain. |
-| Gameplay input | Open | In-world movement and camera control await a rendered scene. |
-| First mission | Open | A playable run through the first mission remains unverified. |
-
-</details>
-
-## Verified on Mac
-
-XCL's small test title exercises 50 Xbox system features. **43 checks passed all three runs, 1 varied, and 6 failed all three.** Each tile below is one check. The fraction on each row counts checks that passed all three runs, out of the subsystem total. [Reproduce the compatibility checks](#reproduce-the-compatibility-checks)
-
-![50 Xbox system checks across three Mac runs. 43 passed all three, one varied and six failed all three. Graphics and frame output passed 11 of 11. GPU memory and commands passed 0 of 5 consistently, with one intermittent check.](assets/relay-progress.png)
-
-<details>
-<summary>Which checks are still open?</summary>
-
-| Tile | Subsystem | Observed result |
+| Check | Subsystem | Observed result |
 | --- | --- | --- |
 | 11 | Window handling | Windows reported that the console window was uncloaked. |
 | 37 | DMA and title memory | The copy read the title's memory in one of three runs. |
@@ -44,23 +44,33 @@ XCL's small test title exercises 50 Xbox system features. **43 checks passed all
 | 41 | Sparse uploads | The first ring-buffer upload returned different bytes than expected. |
 | 46 | DirectStorage | The read did not signal the test's D3D12 fence. |
 
+[Reproduce the compatibility checks](#reproduce-the-compatibility-checks) · [Reproduce the TuxBox Lanes replay](#reproduce-the-tuxbox-lanes-replay)
+
 </details>
 
-**TuxBox Lanes** completed its scripted replay with the optional Lanes build. The game checked all 16 GPU-generated course rows, a winning run, a missed coin, a collision, and two rendered boards by pixel readback. [Reproduce the TuxBox Lanes replay](#reproduce-the-tuxbox-lanes-replay)
+## GTA VI status
+
+Series build 1.0.2.1 on the Mac test setup above.
+
+| Stage | Result |
+| --- | --- |
+| Offline boot | Verified |
+| Intro graphics | Verified |
+| Setup and menus | Verified at about 30 FPS with controller input |
+| World loading | Verified through loading artwork and asset reads |
+| Visible 3D scene | Open |
+| In-world controls | Open |
+| First mission | Open |
 
 ## Current work
 
-Local experiments on the M3 Max, updated 25 November 2026.
+The latest Series X replay captured a black frame after 150 seconds. GPU submissions continued and D3DMetal reported up to **16.8 GiB** of video memory.
 
-### What improved
-
-![Three separate experiments. Shader fallback decreased from 88 to 4 out of the same 723 shaders. Failed storage reads fell from 494 of 87,151 to 0 of 87,242. Preparing the same two GPU pipelines took 25.1 seconds on the first offline pass and 0.3 seconds with the cache warmed.](assets/gta-experiments.png)
-
-### Where the latest run stopped
-
-The Series X replay reached world loading after account selection. The last capture was black at 150 seconds. GPU submissions continued, and D3DMetal reported a peak of 16.8 GiB of video memory in the recorded samples.
-
-![D3DMetal video memory over one Series X run on Apple Silicon. Account selection was at 44 seconds. The last captured frame was black at 150 seconds. The last memory sample was 16.8 GiB.](assets/world-load-memory.png)
+| Measurement | Earlier | Later |
+| --- | ---: | ---: |
+| Shaders using fallback, same 723 variants | 88 | 4 |
+| Failed game-data reads in two runs | 494 of 87,151 | 0 of 87,242 |
+| Time to prepare the same two GPU pipelines offline | 25.1 s | 0.3 s with a warm cache |
 
 <details>
 <summary>Technical results and ongoing work</summary>
@@ -78,8 +88,8 @@ The Series X replay reached world loading after account selection. The last capt
 | Guest semaphore publication | In the 20-pipeline run, five delayed guest values were written 21 to 145 ms after their native fences were observed complete. Submissions still stopped after those stores. | Check the later compute pipeline stalls. |
 | Late compute pipelines | Two compute pipelines that previously stalled world loading were ready before account selection. In the latest replay they built in 90 ms and 84 ms. The preload worker built all 22 selected pipelines before account selection. | Check other pipelines requested during the first world render. |
 | World-load memory | The earlier memory guard stopped the offscreen run at 169.2 seconds. The latest replay tracked 9,412 MiB of texture pages in use with no whole free texture heaps at its last memory sample. | Track texture residency through world loading. |
-| Series S profile | The title switched from native 4K to 1080p. All 62 sampled frames were black, and the offscreen run ended before account selection. | Test the guest memory budget and identify the missing startup render. |
-| macOS memory reporting | A title query treated about 255 GiB of reserved virtual address space as private usage. After the fix, an isolated CrossOver check reported essentially the same working set after reserving 8 GiB and counted the additional 64 MiB after it was touched. | Verify the corrected guest query in a Series S replay. [Wine process counters](https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/ntdll/unix/process.c) |
+| Series S profile | The title submitted two display planes. The earlier captures sampled its 1080p plane, which was black. | Check the other display plane for the startup image. |
+| macOS memory reporting | A title query treated about 255 GiB of reserved virtual address space as private usage. The corrected Series S query reported 5.6 GiB in use against an 8 GiB budget. An isolated CrossOver test verified reservation and resident-memory accounting. | Track usage during world loading. [Wine process counters](https://raw.githubusercontent.com/wine-mirror/wine/master/dlls/ntdll/unix/process.c) |
 | Ray-tracing memory | In a synthetic D3DMetal test, a shader read both successive CPU writes through the coherent shadow. An opt-in build routed a 2,199 MiB retail allocation through the same path. The 194-second run logged the Rosetta float-to-half store error before GPU submissions stopped on loading artwork. | Test the replacement store during world loading. |
 | DirectStorage | A focused CPU test reproduced a read starting before its destination page list was ready. The queue change passed the byte-for-byte check. A combined shader and storage build logged zero failures across 87,082 requests and still stopped on loading artwork. | Verify that the fix holds across repeated world loads. [Upstream queue fix](https://github.com/ivall/xcl/pull/549) |
 | DirectStorage on D3DMetal | Fixed a valid fence being rejected. In a separate 64 KiB zlib test, an early-queued GPU command read stale bytes with shadow synchronization disabled and the correct bytes with it enabled. The retail test streamed assets, then Rosetta stopped at a float-to-half memory store. | Verify the first rendered world frame with the corrected memory path. |
