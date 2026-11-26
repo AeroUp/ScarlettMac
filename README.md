@@ -1,5 +1,12 @@
 # ScarlettMac
 
+<p align="center">
+  <a href="#tested-on-mac"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-0091FF" alt="macOS: Apple Silicon"></a>
+  <a href="#tested-on-mac"><img src="https://img.shields.io/badge/Tested-M3%20Max-5832A8" alt="Tested on M3 Max"></a>
+  <a href="#captured-on-mac"><img src="https://img.shields.io/badge/ScarlettMac-3D%20opening-04a519" alt="ScarlettMac 3D opening"></a>
+  <a href="https://discord.gg/EJKCj64geW"><img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&amp;logoColor=white" alt="Discord community"></a>
+</p>
+
 <a name="captured-on-mac"></a>
 
 <a name="latest-captures"></a>
@@ -44,13 +51,6 @@ These images are from earlier tests, before the character close-up and the saved
 </table>
 
 [Replay details](docs/compatibility.md#scarlettmac-opening-cinematic) · [Development test results](docs/compatibility.md#recent-development-tests)
-
-[![macOS: Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-0091FF)](#tested-on-mac)
-[![Tested on M3 Max](https://img.shields.io/badge/Tested-M3%20Max-5832A8)](#tested-on-mac)
-[![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-04a519)](#how-it-works)
-[![XCL: World loading](https://img.shields.io/badge/XCL-World%20loading-FFD700)](#gta-vi-status)
-[![ScarlettMac 3D opening](https://img.shields.io/badge/ScarlettMac-3D%20opening-04a519)](#captured-on-mac)
-[![Discord community](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/EJKCj64geW)
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
