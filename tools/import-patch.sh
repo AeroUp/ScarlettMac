@@ -16,16 +16,23 @@ set -eu
 
 root=${0:A:h:h}
 patches=$root/runtime-preview/checkpoint/patches
-pin=c84e42a3070eebd9d627b84538c92a5ddbff9273
 
 wt=${1:?usage: $0 WORKTREE NAME [--checkpoint]}
 name=${2:?usage: $0 WORKTREE NAME [--checkpoint]}
 [[ -d $wt ]] || { print -u2 "no worktree at $wt"; exit 2 }
 
-# The cleanest source of truth: what changed relative to the pinned upstream.
-diff=$(git -C "$wt" diff "$pin")
+# The base is the "Checkpoint base" commit, not the pinned upstream: diffing
+# against the pin would carry the four checkpoint patches into the new patch.
+base=$(git -C "$wt" log --format='%H %s' | grep -m1 'Checkpoint base' | cut -d' ' -f1)
+[[ -n $base ]] || { print -u2 "$wt has no Checkpoint base commit"; exit 1 }
+# The pinned upstream is that base's parent: the scratch checkout below starts
+# there and applies the whole series plus the new patch on top.
+pin=$(git -C "$wt" rev-parse "$base^")
+
+# What changed since that base, committed or not.
+diff=$(git -C "$wt" diff "$base")
 if [[ -z $diff ]]; then
-    print -u2 "$wt has no changes against $pin"
+    print -u2 "$wt has no changes since $base"
     exit 1
 fi
 
