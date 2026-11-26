@@ -5,8 +5,9 @@ Reads the newest runs/*.log the launcher writes, plus the Mac's own counters,
 and draws a small text dashboard: run and loading progress bars, fps, frame
 time and interval, draws, copy cost, the queue, and CPU / RAM / swap / GPU.
 
-  tools/scarlett-hud.py           live, redraws every second in this terminal
-  tools/scarlett-hud.py --once    one frame to stdout (the floating window uses this)
+  tools/scarlett-hud.py           live, redraws every 0.1 s in this terminal
+  tools/scarlett-hud.py --once    one frame to stdout
+  tools/scarlett-hud.py --stream  a frame every 0.1 s, form-feed separated (the window uses this)
   tools/scarlett-hud.sh           opens it in an always-on-top window
 """
 import glob, os, re, subprocess, sys, time
@@ -86,46 +87,101 @@ def lock_owner():
         return None
 
 
-def run_state():
-    logs = sorted(glob.glob(os.path.join(RUNS, "*.log")), key=os.path.getmtime)
-    if not logs:
-        return None
-    path = logs[-1]
-    name = os.path.basename(path)[:-4]
-    m = re.match(r"(\d{8}-\d{6})-(.*)", name)
-    started = time.mktime(time.strptime(m.group(1), "%Y%m%d-%H%M%S")) if m else os.path.getmtime(path)
-    tag = m.group(2) if m else name
-    text = ANSI.sub("", tail(path))
-    samples, intervals, frame, crash, first_world = [], [], None, None, None
-    for line in text.splitlines():
+class Follower:
+    """Follows the newest runs/*.log, reading only the bytes added since last time."""
+
+    def __init__(self):
+        self.path = None
+        self.reset()
+
+    def reset(self):
+        self.offset = 0
+        self.partial = ""
+        self.samples, self.intervals = [], []
+        self.frame = self.crash = self.first_world = None
+
+    def newest(self):
+        logs = glob.glob(os.path.join(RUNS, "*.log"))
+        return max(logs, key=os.path.getmtime) if logs else None
+
+    def poll(self):
+        path = self.newest()
+        if path is None:
+            return
+        if path != self.path:
+            self.path = path
+            self.reset()
+            self.offset = max(0, os.path.getsize(path) - 4_000_000)
+        size = os.path.getsize(path)
+        if size < self.offset:
+            self.reset()
+        if size == self.offset:
+            return
+        with open(path, "rb") as f:
+            f.seek(self.offset)
+            chunk = f.read(size - self.offset)
+        self.offset = size
+        text = self.partial + ANSI.sub("", chunk.decode("utf-8", "replace"))
+        lines = text.split("\n")
+        self.partial = lines.pop()
+        for line in lines:
+            self.parse(line)
+        del self.samples[:-400]
+        del self.intervals[:-50]
+
+    def parse(self, line):
         h = HOST.match(line)
         if h:
             s = dict(t=ts(h.group(1)), fps=float(h.group(2)), ms=float(h.group(3)), prep=float(h.group(4)),
                      copy_ms=float(h.group(5)), copy_mb=float(h.group(6)), tex_ms=float(h.group(7)),
                      tex_mb=float(h.group(8)), gpu=float(h.group(9)), draws=int(h.group(10)),
                      dropped=int(h.group(11) or 0))
-            samples.append(s)
-            if first_world is None and s["draws"] >= WORLD_DRAWS and s["t"]:
-                first_world = s["t"]
-            continue
+            self.samples.append(s)
+            if self.first_world is None and s["draws"] >= WORLD_DRAWS and s["t"]:
+                self.first_world = s["t"]
+            return
         i = INTERVAL.search(line)
         if i:
-            intervals.append(float(i.group(1)))
+            self.intervals.append(float(i.group(1)))
         f = FRAME_NO.search(line)
         if f:
-            frame = int(f.group(1))
+            self.frame = int(f.group(1))
         c = CRASH.search(line)
         if c:
-            crash = f"{c.group(1)} at {c.group(2)}"
-    planned = None
-    live = False
-    for t, sec, pid in launchers():
+            self.crash = f"{c.group(1)} at {c.group(2)}"
+
+
+FOLLOW = Follower()
+SLOW = {"at": 0.0}
+
+
+def slow_state():
+    """Processes, lock and system counters: refreshed twice a second."""
+    if time.time() - SLOW["at"] >= 0.5:
+        SLOW.update(at=time.time(), launchers=launchers(), owner=lock_owner(), system=system())
+    return SLOW
+
+
+def run_state():
+    FOLLOW.poll()
+    path = FOLLOW.path
+    if path is None:
+        return None
+    slow = slow_state()
+    name = os.path.basename(path)[:-4]
+    m = re.match(r"(\d{8}-\d{6})-(.*)", name)
+    started = time.mktime(time.strptime(m.group(1), "%Y%m%d-%H%M%S")) if m else os.path.getmtime(path)
+    tag = m.group(2) if m else name
+    planned, live = None, False
+    for t, sec, pid in slow["launchers"]:
         if t == tag:
             planned = sec or planned
-            live = live or pid == lock_owner()
-    live = live or (time.time() - os.path.getmtime(path) < 20 and lock_owner() is not None)
-    return dict(path=path, tag=tag, started=started, samples=samples, intervals=intervals, frame=frame,
-                crash=crash, first_world=first_world, planned=planned, live=live, mtime=os.path.getmtime(path))
+            live = live or pid == slow["owner"]
+    mtime = os.path.getmtime(path)
+    live = live or (time.time() - mtime < 20 and slow["owner"] is not None)
+    return dict(path=path, tag=tag, started=started, samples=FOLLOW.samples, intervals=FOLLOW.intervals,
+                frame=FOLLOW.frame, crash=FOLLOW.crash, first_world=FOLLOW.first_world, planned=planned,
+                live=live, mtime=mtime)
 
 
 def system():
@@ -172,7 +228,7 @@ def render():
     now = time.time()
     out = []
     line = "─" * WIDTH
-    out.append(f" SCARLETTMAC HUD{time.strftime('%H:%M:%S'):>{WIDTH - 16}}")
+    out.append(f" SCARLETTMAC HUD{time.strftime('%H:%M:%S') + f'.{int(now * 10) % 10}':>{WIDTH - 16}}")
     out.append(line)
     r = run_state()
     if r is None:
@@ -180,9 +236,9 @@ def render():
     else:
         elapsed = (now if r["live"] else r["mtime"]) - r["started"]
         state = "RUNNING" if r["live"] else ("CRASHED" if r["crash"] else "ENDED")
-        out.append(f" run   {r['tag'][:34]:<34} {state:>8} {int(elapsed)//60:3d}m{int(elapsed)%60:02d}s")
+        out.append(f" run   {r['tag'][:34]:<34} {state:>8} {int(elapsed)//60:3d}m{elapsed%60:04.1f}s")
         if r["planned"]:
-            out.append(f" time  {bar(elapsed / r['planned'])} {int(elapsed):4d}/{r['planned']} s")
+            out.append(f" time  {bar(elapsed / r['planned'])} {elapsed:6.1f}/{r['planned']} s")
         s = r["samples"][-1] if r["samples"] else None
         if r["first_world"]:
             load_s = r["first_world"] - r["started"]
@@ -208,12 +264,13 @@ def render():
         if r["crash"]:
             out.append(f" CRASH {r['crash']}")
     out.append(line)
-    q = [t for t, _, pid in launchers() if pid != lock_owner()]
-    owners = {t for t, _, pid in launchers() if pid == lock_owner()}
-    out.append(f" lock  {', '.join(owners) or ('held' if lock_owner() else 'free')}")
+    slow = slow_state()
+    q = [t for t, _, pid in slow["launchers"] if pid != slow["owner"]]
+    owners = {t for t, _, pid in slow["launchers"] if pid == slow["owner"]}
+    out.append(f" lock  {', '.join(owners) or ('held' if slow['owner'] else 'free')}")
     out.append(f" queue {', '.join(sorted(set(q) - owners)) or 'empty'}")
     out.append(line)
-    m = system()
+    m = slow["system"]
     out.append(f" CPU   {bar(m['cpu'] / 100, 24)} {m['cpu']:5.1f}%  title {m['title_cpu']:.0f}%  wineserver {m['wine_cpu']:.0f}%")
     out.append(f" RAM   {bar(m['ram_used'] / m['ram_total'], 24)} {gb(m['ram_used'])} / {gb(m['ram_total']).strip()}")
     out.append(f"       title {gb(m['title_rss']).strip()}   swap {m['swap_mb'] / 1024:.1f} GB")
@@ -227,13 +284,20 @@ def main():
     if "--once" in sys.argv:
         print(render())
         return
-    try:
-        sys.stdout.write("\x1b[?25l")
+    if "--stream" in sys.argv:
+        # One frame every 0.1 s, each ended by a form feed, for the HUD window.
         while True:
-            frame = render()
-            sys.stdout.write("\x1b[H\x1b[2J" + frame + "\n")
+            t0 = time.time()
+            sys.stdout.write(render() + "\f")
             sys.stdout.flush()
-            time.sleep(1)
+            time.sleep(max(0.0, 0.1 - (time.time() - t0)))
+    try:
+        sys.stdout.write("\x1b[?25l\x1b[2J")
+        while True:
+            t0 = time.time()
+            sys.stdout.write("\x1b[H" + render().replace("\n", "\x1b[K\n") + "\x1b[K\x1b[J")
+            sys.stdout.flush()
+            time.sleep(max(0.0, 0.1 - (time.time() - t0)))
     except KeyboardInterrupt:
         pass
     finally:
