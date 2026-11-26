@@ -123,6 +123,18 @@ These November 26, 2026 tests used a separate, locally adapted Cool Fox build on
 | First heavy scene | In one guarded run, all 113 logged mesh calls returned at the graphics API. The last captured frame before the heavy draws was black. A visible scene and character control remain unverified in this build. |
 | Memory and synchronization | In another run, texture and staging pools grew by about 2 GiB ahead of the first heavy scene. A separate live stack showed one mesh-recording thread waiting for a read lock. The cause of the rendering stall is still open. |
 
+## Prologue rendering breakthroughs
+
+On November 26, 2026, experimental runtimes on an Apple M3 Max with CrossOver and D3DMetal captured these scenes in the final game image.
+
+| Test | Verified result | Remaining limit |
+| --- | --- | --- |
+| Series S Prologue with desktop AMD FSR | The title read the 250,880-byte Prologue save data. AMD FSR 3.1.6 upscaled the game from 1280 × 720 to 1920 × 1080. Frame 3129 showed a fenced yard and a guard tower. | Lighting was heavily overexposed. The memory guard ended the run at 179 seconds. |
+| Series S Prologue with 1080p compositing | A separate run read the same save and reproduced the yard in frame 3205, with people visible near the watchtower. The runtime blended the display layers into a 1080p output. | The memory guard ended the run at 162 seconds, before a controlled camera test. |
+| Local Cool Fox Series S opening | Frame 2767 showed a lit character close-up after illustrated loading artwork. | The run hit a read fault at world entry before input could be verified. |
+
+These tests establish visible 3D output. Sustained rendering, walking, and camera control in a visible scene remain unverified. The public XCL build's measured milestone remains world loading.
+
 ## Mullion fallback
 
 Mullion v0.5-alpha.4 ran in a separate CrossOver bottle. It passed 48 of 50 synthetic checks and let the GPU read XCL's imported host memory directly. After fixes for command-list creation and console render-target descriptors, the title advanced to black offscreen captures through frame 290. A Metal GPU write fault then caused device removal. [Mullion release](https://github.com/dttdrv/mullion/releases/tag/v0.5-alpha.4)

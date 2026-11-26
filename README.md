@@ -23,11 +23,17 @@ Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress,
 > [!WARNING]
 > **In development.** GTA VI gameplay is currently unavailable.
 
+### Major breakthroughs on Apple Silicon
+
+**November 26, 2026** · The saved Prologue rendered in the final game output on an Apple M3 Max. Two Series S runs showed the yard with fences and a watchtower. The game used AMD FSR 3.1.6 to upscale from 720p to 1080p. A separate Cool Fox run rendered a lit character close-up after the loading screen.
+
+The yard still has severe lighting artifacts. Walking and camera control in a visible scene remain unverified. [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
+
 | Build tested on M3 Max | Latest verified result |
 | --- | --- |
 | Public XCL build | First-run menus accepted controller input. The game reached world loading and read scene assets. |
 | Experimental ScarlettMac runtime | Rendered parts of the live 3D opening below 1 FPS with visible artifacts. A separate run verified pause and resume. |
-| Local Cool Fox experiments | A graphics test drew meshes on D3DMetal. In the game, the runtime began recording the first heavy scene's mesh calls. The last captured frame was black. |
+| Local Cool Fox experiments | Rendered a lit character close-up during the opening. |
 
 Player movement and camera control in a visible 3D scene remain unverified. [Development test results](docs/compatibility.md#recent-development-tests) · [November 26 graphics test](docs/compatibility.md#cool-fox-graphics-experiments)
 
