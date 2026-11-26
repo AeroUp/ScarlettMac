@@ -29,6 +29,10 @@ Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress,
 
 The yard still has severe lighting artifacts. Walking and camera control in a visible scene remain unverified. [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
 
+| Prologue prison yard | Opening character close-up |
+| --- | --- |
+| [<img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower">](assets/captures/prologue-prison-yard.png) | [<img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening">](assets/captures/prologue-character-close-up.png) |
+
 | Build tested on M3 Max | Latest verified result |
 | --- | --- |
 | Public XCL build | First-run menus accepted controller input. The game reached world loading and read scene assets. |
