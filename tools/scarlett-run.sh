@@ -38,6 +38,10 @@ wine=${SCARLETT_WINE:-$HOME/Library/Caches/victory-macos/target/wine-cx/bin/wine
 prefix=${SCARLETT_PREFIX:-$HOME/ScarlettWine}
 
 [[ -x $wine ]] || { print -u2 "No Wine at $wine"; exit 1; }
+# Several workers share the one lock and a run takes about six minutes, so a
+# short queue gives up behind two runs. Any queue waits at least an hour.
+[[ $wait -gt 0 && $wait -lt 3600 ]] && wait=3600
+
 [[ -f $exe ]] || { print -u2 "No runtime at $exe (build it first)"; exit 1; }
 [[ -f $runtime/libunwind.dll ]] || { print -u2 "libunwind.dll missing beside the runtime"; exit 1; }
 
