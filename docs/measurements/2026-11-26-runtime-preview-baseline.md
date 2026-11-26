@@ -37,6 +37,31 @@ python3 tools/fps-report.py runs/<stamp>-baseline.log
   (`shader does not translate`), 4 black frames, 1 unordered view the host
   cannot store, 1 ignored depth-bounds test, 4 slow host submissions.
 
+## Shader translation, not the present path, is what stalls the run
+
+Run B translated 574 shaders, 126 of them for the first time in this run
+(`cached=false`, 126 distinct hashes) and 448 from the cache. The 126 first
+translations account for 266.8 s of caller wait and 783.4 s of user CPU inside a
+176 s run, with 206.3 s of kernel time. By stage they are 542 compute, 16 vertex
+and 16 pixel shaders, so this is almost entirely the compute work that builds
+the world.
+
+| Caller wait per shader | Shaders | Total wait | Total user CPU |
+| --- | --- | --- | --- |
+| under 100 ms | 52 | 2.1 s | 7.6 s |
+| 100-500 ms | 11 | 1.8 s | 4.9 s |
+| 1-3 s | 24 | 55.0 s | 172.3 s |
+| 3-10 s | 39 | 207.9 s | 598.6 s |
+
+The 26.35 s hitch between frame 128 and 256 contains 25 first translations
+summing 51.4 s of wait, so about two are in flight at once. The hitch is a
+translation storm, and the run never reaches the world because it spends its
+budget translating.
+
+This changes where a fix pays: making a refused shader translatable adds a
+multi-second first-use cost, so coverage work and translation cost have to move
+together.
+
 ## Comparing runs
 
 `tools/fps-report.py --compare BASELINE LOG` prints one number per quantity for
