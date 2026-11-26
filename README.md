@@ -20,9 +20,13 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 > [!WARNING]
 > **In development.** GTA VI gameplay is currently unavailable.
 
-**GTA VI reaches world loading through XCL on the M3 Max. Tests with a separate experimental runtime rendered the live 3D opening and verified pause and resume input.**
+| Build tested on M3 Max | Latest verified result |
+| --- | --- |
+| Public XCL build | First-run menus accepted controller input. The game reached world loading and read scene assets. |
+| Experimental ScarlettMac runtime | Rendered parts of the live 3D opening below 1 FPS with visible artifacts. A separate run verified pause and resume. |
+| Local Cool Fox experiments | A graphics test drew meshes on D3DMetal. In the game, the runtime began recording the first heavy scene's mesh calls. The last captured frame was black. |
 
-The 3D opening ran below 1 FPS and showed severe rendering artifacts. Player movement and camera control remain unverified. These development tests used a local runtime configuration with additional patches. [Development test results](docs/compatibility.md#recent-development-tests)
+Player movement and camera control in a visible 3D scene remain unverified. [Development test results](docs/compatibility.md#recent-development-tests) · [November 26 graphics test](docs/compatibility.md#cool-fox-graphics-experiments)
 
 ### Captured on Mac
 
@@ -100,6 +104,8 @@ scripts/run.sh /path/to/unpacked/game.exe
 ```
 
 Set `SCARLETT_BOTTLE_DIR` to use a dedicated bottle in another location. Set `SCARLETT_OPUS_DLL` to an x64 `libopus-0.dll` to enable the Opus decoder. The launcher stores local data in the bottle under `C:\scarlett-lab-data` and runs with outbound IP traffic disabled.
+
+Set `SCARLETT_CROSSOVER_APP` to select a different CrossOver app bundle. The launcher accepts an absolute path or a path relative to the directory you run it from. [Launcher fix](https://github.com/paveledits/ScarlettMac/pull/2)
 
 The repository distributes project source, patches, and launcher scripts. Supply your own unpacked game files. [Source provenance](SOURCE-NOTICES.md)
 

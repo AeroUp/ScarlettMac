@@ -113,6 +113,16 @@ In the November 25, 2026 native-window shader test, the host presented at least 
 
 The opening showed severe rendering artifacts and performance below 1 FPS. Gameplay remains unavailable.
 
+## Cool Fox graphics experiments
+
+These November 26, 2026 tests used a separate, locally adapted Cool Fox build on the same M3 Max and D3DMetal setup.
+
+| Check | Observed result |
+| --- | --- |
+| Mesh rendering test | Direct dispatch and bounded indirect dispatch both drew a triangle into an 8 × 8 render target. GPU readback returned the expected white and black pixels. |
+| First heavy scene | In one guarded run, all 113 logged mesh calls returned at the graphics API. The last captured frame before the heavy draws was black. A visible scene and character control remain unverified in this build. |
+| Memory and synchronization | In another run, texture and staging pools grew by about 2 GiB ahead of the first heavy scene. A separate live stack showed one mesh-recording thread waiting for a read lock. The cause of the rendering stall is still open. |
+
 ## Mullion fallback
 
 Mullion v0.5-alpha.4 ran in a separate CrossOver bottle. It passed 48 of 50 synthetic checks and let the GPU read XCL's imported host memory directly. After fixes for command-list creation and console render-target descriptors, the title advanced to black offscreen captures through frame 290. A Metal GPU write fault then caused device removal. [Mullion release](https://github.com/dttdrv/mullion/releases/tag/v0.5-alpha.4)
