@@ -20,7 +20,7 @@ Build:
 export PATH=$HOME/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH
 export RUSTUP_TOOLCHAIN=1.98.1-aarch64-apple-darwin
 cd .build/wt-NAME
-LLVM_MINGW_ROOT=/Users/aero/Documents/ScarlettMac/.toolchain/llvm-mingw-20261117-ucrt-macos-universal \
+LLVM_MINGW_ROOT=$PWD/.toolchain/llvm-mingw-20261117-ucrt-macos-universal \
   CARGO_TARGET_DIR=$PWD/target cargo build --locked --jobs 3 \
   --target x86_64-pc-windows-gnullvm --profile diag --features diagnostics -p victory
 ```
@@ -50,6 +50,21 @@ whether the world renders.
 tools/world-run.sh --runtime .build/wt-NAME/target/x86_64-pc-windows-gnullvm/diag \
   --tag NAME --seconds 330 --at 150,200,250,300 --wait 900
 ```
+
+The lighting passes need `VICTORY_WAVE64_REDUCE=1`; with 1280×720 output and the
+support alert skipped, a world run on an 18 GB Mac is:
+
+```sh
+VICTORY_WAVE64_REDUCE=1 VICTORY_OUTPUT=1280x720 VICTORY_SMALL_LOOSE_WINDOWS=1 \
+VICTORY_SKIP_SUPPORT_ALERT=1 tools/world-run.sh \
+  --runtime .build/wt-NAME/target/x86_64-pc-windows-gnullvm/diag \
+  --tag NAME --seconds 420 --at 240,300,360,400 --wait 3600
+```
+
+`tools/scarlett-hud.sh` opens an always-on-top window that follows the newest
+run every 0.1 s: run and loading progress, fps, frame time and interval, copy
+and GPU cost, the lock and queue, CPU, RAM, swap, GPU use and the title's real
+footprint (`--cli` shows the same in a terminal).
 
 ## Judging a run
 

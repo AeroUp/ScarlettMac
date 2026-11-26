@@ -72,7 +72,7 @@ def launchers():
     """Every world-run/scarlett-run launcher: (tag, planned seconds, pid)."""
     out = []
     for line in sh(["ps", "-axo", "pid=,command="]).splitlines():
-        if "scarlett-run.sh" not in line or "zsh" not in line:
+        if not re.search(r"\bzsh \S*scarlett-run\.sh --", line):
             continue
         tag = re.search(r"--tag (\S+)", line)
         sec = re.search(r"--seconds (\d+)", line)

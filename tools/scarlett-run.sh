@@ -100,9 +100,10 @@ export WINEDLLOVERRIDES="mscoree,mshtml=;d3d12,d3d12core,dxgi=b"
 export WINEDEBUG=${WINEDEBUG:--all}
 export ROSETTA_ADVERTISE_AVX=1
 # The offline picker's confirmation, written to this file (see
-# runtime-preview/checkpoint/patches/0001-local-picker-marker.patch). The file
+# the picker marker in runtime-preview/checkpoint/patches/0001-Checkpoint-base-...). The file
 # must be fresher than 600 ms when the title polls it.
-export VICTORY_CONFIRM_FILE="Z:\\Users\\aero\\Documents\\ScarlettMac\\.build\\confirm.txt"
+confirm_win="Z:${marker:A}"
+export VICTORY_CONFIRM_FILE=${confirm_win//\//\\}
 : "${VICTORY_SNAPSHOT_POOL_MIB:=256}"
 export VICTORY_SNAPSHOT_POOL_MIB
 export VICTORY_DIRECT_BARYCENTRICS=${VICTORY_DIRECT_BARYCENTRICS:-1}
