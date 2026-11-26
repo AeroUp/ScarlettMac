@@ -35,7 +35,7 @@ done
 
 runtime=${runtime:A}   # absolute: the launch below changes into it
 exe=$runtime/victory.exe
-wine=${SCARLETT_WINE:-$HOME/Library/Caches/victory-macos/target/wine-cx/bin/wine}
+wine=${SCARLETT_WINE:-${0:A:h:h}/.toolchain/wine-cx/bin/wine}
 prefix=${SCARLETT_PREFIX:-$HOME/ScarlettWine}
 
 [[ -x $wine ]] || { print -u2 "No Wine at $wine"; exit 1; }
@@ -55,10 +55,13 @@ until mkdir "$lock" 2>/dev/null; do
     # The owner's pid is in the lock. A launcher that was killed (SIGKILL
     # skips the trap below) leaves the lock behind with nobody running: if
     # its owner is gone, the lock is stale and is taken over.
-    owner=$(cat "$lock/pid" 2>/dev/null)
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
     if [[ -n $owner ]] && ! kill -0 "$owner" 2>/dev/null; then
-        print "the lock's owner (pid $owner) is gone: taking the stale lock over"
-        rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null
+        if [[ $(cat "$lock/pid" 2>/dev/null || true) == "$owner" ]]; then
+            print "the lock's owner (pid $owner) is gone: taking the stale lock over"
+            rm -f "$lock/pid" 2>/dev/null || true
+            rmdir "$lock" 2>/dev/null || true
+        fi
         continue
     fi
     if [[ $waited -ge $wait ]]; then
@@ -73,6 +76,13 @@ trap 'rm -rf "$lock"' EXIT
 print $$ > "$lock/pid"
 if [[ $waited -gt 0 ]]; then
     print "waited ${waited}s for the single-instance lock"
+fi
+
+if [[ -n ${SCARLETT_WINE:-} || ${SCARLETT_FRESH_WINESERVER:-0} == 1 ]]; then
+    WINEPREFIX=$prefix "${0:A:h:h}/.toolchain/wine-cx/bin/wineserver" -k 2>/dev/null || true
+    WINEPREFIX=$prefix "${wine:h}/wineserver" -k 2>/dev/null || true
+    sleep 1
+    print "wine: $wine (wineserver: ${wine:h}/wineserver)"
 fi
 
 # One title at a time; the lock above is the guard. (A pgrep for the guest
@@ -126,4 +136,7 @@ limiter=$!
 
 wait "$wine_pid" 2>/dev/null || true
 kill "$writer" "$limiter" 2>/dev/null || true
+if [[ -n ${SCARLETT_WINE:-} || ${SCARLETT_FRESH_WINESERVER:-0} == 1 ]]; then
+    WINEPREFIX=$prefix "${wine:h}/wineserver" -k 2>/dev/null || true
+fi
 print "done: $log"

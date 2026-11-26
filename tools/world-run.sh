@@ -28,6 +28,7 @@ while [[ $# -gt 0 ]]; do
         *) print -u2 "Usage: $0 [--runtime DIR] [--tag NAME] [--seconds N] [--at LIST] [--wait N]"; exit 2 ;;
     esac
 done
+[[ $wait -gt 0 && $wait -lt 3600 ]] && wait=3600
 
 shot=$root/.build/window-shot
 [[ -x $shot ]] || { print -u2 "Build the capture tool first: xcrun swiftc -O -o .build/window-shot tools/window-shot.swift"; exit 1; }
