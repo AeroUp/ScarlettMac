@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="660" height="444" viewBox="0 0 660 444" role="img" aria-labelledby="title description">
-  <title id="title">ScarlettMac GTA VI launch milestones</title>
-  <desc id="description">Four of seven stages reached on an Apple M3 Max. Offline boot, intro and menus are verified. Loading artwork and world asset reads were observed. A live 3D scene, gameplay controls and the first mission are open.</desc>
+  <title id="title">GTA VI launch milestones with ScarlettMac XCL</title>
+  <desc id="description">ScarlettMac's XCL build reached four of seven stages on an Apple M3 Max. Offline boot, intro and menus are verified. Loading artwork and world asset reads were observed. A live 3D scene, gameplay controls and the first mission are open for this build.</desc>
   <rect x=".5" y=".5" width="659" height="443" rx="11" fill="#ffffff" stroke="#d1d9e0"/>
   <path d="M12 1h636a11 11 0 0 1 11 11v62H1V12A11 11 0 0 1 12 1Z" fill="#f6f8fa"/>
   <path d="M1 74.5h658M33 106v304" fill="none" stroke="#d1d9e0"/>
   <path d="M33 106v150" fill="none" stroke="#1a7f37" stroke-opacity=".65" stroke-width="2"/>
   <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
-    <text x="24" y="32" fill="#1f2328" font-size="23" font-weight="700">World loading reached</text>
+    <text x="24" y="32" fill="#1f2328" font-size="23" font-weight="700">World loading reached on XCL</text>
     <text x="24" y="55" fill="#59636e" font-size="14">Xbox Series 1.0.2.1 · Apple M3 Max</text>
     <text x="636" y="30" text-anchor="end" fill="#1f2328" font-size="13" font-weight="600">4 of 7 stages reached</text>
     <g>

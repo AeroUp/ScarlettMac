@@ -52,19 +52,20 @@ These images are from earlier tests, before the character close-up and the saved
 
 [Replay details](docs/compatibility.md#scarlettmac-opening-cinematic) · [Development test results](docs/compatibility.md#recent-development-tests)
 
-ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
+ScarlettMac is an experimental Xbox Series X|S compatibility project for Apple Silicon Macs. The XCL build and ScarlettMac Runtime Preview both run through CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
-[Build and run XCL](#build-and-run) · [Runtime preview](runtime-preview/BUILD.md) · [Compatibility results](docs/compatibility.md)
+[Build and run XCL](#build-and-run) · [ScarlettMac Runtime Preview](runtime-preview/BUILD.md) · [Compatibility results](docs/compatibility.md)
 
 ## GTA VI status
 
 | Build tested on M3 Max | Latest verified result |
 | --- | --- |
-| Public XCL build | First-run menus accepted controller input. The game reached world loading and read scene assets. |
-| Experimental ScarlettMac runtime | Rendered parts of the live 3D opening below 1 FPS with visible artifacts. A separate run verified pause and resume. |
-| Local Cool Fox experiments | Rendered a lit character close-up during the opening. |
+| ScarlettMac XCL | First-run menus accepted controller input. The game reached world loading and read scene assets. |
+| ScarlettMac Runtime Preview checkpoint | Confirmed the offline player picker from a launcher marker and reached story loading. The game stopped during a timing check. |
+| ScarlettMac development builds | Rendered parts of the 3D opening with artifacts. A separate run verified pause and resume. |
+| Local Cool Fox experiments | Rendered a lit street and a character close-up during the opening. Later trials hit a D3DMetal read fault. |
 
-Player movement and camera control in a visible 3D scene remain unverified. [Development test results](docs/compatibility.md#recent-development-tests) · [November 26 graphics test](docs/compatibility.md#cool-fox-graphics-experiments)
+[Development test results](docs/compatibility.md#recent-development-tests) · [Runtime checkpoint](docs/compatibility.md#scarlettmac-runtime-preview-checkpoint) · [Cool Fox graphics tests](docs/compatibility.md#cool-fox-graphics-experiments)
 
 ### XCL launch milestones
 
@@ -73,7 +74,7 @@ Player movement and camera control in a visible 3D scene remain unverified. [Dev
   <source media="(max-width: 480px) and (prefers-color-scheme: light)" srcset="assets/gta-launch-milestones-mobile-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="assets/gta-launch-milestones-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="assets/gta-launch-milestones-light.svg">
-  <img alt="GTA VI launch milestones on M3 Max. Offline boot, intro graphics, and menus with controller input at about 30 FPS are verified. Loading artwork and asset reads were observed. The next milestone is a visible 3D scene. In-world controls and the first mission are open." src="assets/gta-launch-milestones-dark.svg">
+  <img alt="ScarlettMac XCL launch milestones on M3 Max. Offline boot, intro graphics, and menus with controller input at about 30 FPS are verified. Loading artwork and asset reads were observed. In-world graphics and controls are open for XCL." src="assets/gta-launch-milestones-dark.svg">
 </picture>
 
 [Compatibility measurements and reproduction steps](docs/compatibility.md)
@@ -128,12 +129,12 @@ Set `SCARLETT_CROSSOVER_APP` to select a different CrossOver app bundle. The lau
 
 The repository distributes project source, patches, and launcher scripts. Supply your own unpacked game files. [Source provenance](SOURCE-NOTICES.md)
 
-## Runtime preview
+## ScarlettMac Runtime Preview
 
-Build the independent VIctory-macOS runtime for CrossOver on Apple Silicon. The preview includes a configurable cap for recycled CPU snapshot buffers and an opt-in pixel shader interpolation fix. [Build and verify the runtime](runtime-preview/BUILD.md)
+The preview builds from pinned VIctory-macOS source. The November 26 checkpoint accepts an offline-picker confirmation marker, checks mesh pipelines against Metal’s output limit, and offers an input trace for testing in-world controls. [Build and verify ScarlettMac Runtime Preview](runtime-preview/BUILD.md)
 
 ## Credits and license
 
 This project builds on XCL by ivall and the macOS work by utkarshxdev. [ivall/xcl](https://github.com/ivall/xcl), [utkarshxdev/xcl-mac](https://github.com/utkarshxdev/xcl-mac)
 
-The XCL-derived patches are distributed under GPL-2.0-only. See [LICENSE](LICENSE).
+The XCL-derived patches use [GPL-2.0-only](LICENSE). ScarlettMac Runtime Preview uses [GPL-3.0-or-later](runtime-preview/LICENSE) and credits [VIctory-macOS](https://github.com/pragyaangaur/VIctory-macOS).

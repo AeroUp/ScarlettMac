@@ -2,13 +2,18 @@
 set -eu
 
 bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+recipe=$bundle
+if [ "${1-}" = --checkpoint ]; then
+    recipe=$bundle/checkpoint
+    shift
+fi
 mode=build
 if [ "${1-}" = --prepare ]; then
     mode=prepare
     shift
 fi
 if [ "$#" -ne 1 ]; then
-    printf 'Usage: %s [--prepare] NEW_SOURCE_DIR\n' "$0" >&2
+    printf 'Usage: %s [--checkpoint] [--prepare] NEW_SOURCE_DIR\n' "$0" >&2
     exit 2
 fi
 
@@ -37,7 +42,7 @@ fi
 {
     IFS= read -r upstream
     IFS= read -r pin
-} < "$bundle/UPSTREAM"
+} < "$recipe/UPSTREAM"
 
 git init -q -- "$source_dir"
 git -C "$source_dir" fetch --quiet --depth=1 -- "$upstream" "$pin"
@@ -45,9 +50,9 @@ git -C "$source_dir" checkout --quiet --detach FETCH_HEAD
 [ "$(git -C "$source_dir" rev-parse HEAD)" = "$pin" ]
 while IFS= read -r patch; do
     [ -n "$patch" ] || continue
-    git -C "$source_dir" apply --index --check "$bundle/patches/$patch"
-    git -C "$source_dir" apply --index "$bundle/patches/$patch"
-done < "$bundle/patches/series"
+    git -C "$source_dir" apply --index --check "$recipe/patches/$patch"
+    git -C "$source_dir" apply --index "$recipe/patches/$patch"
+done < "$recipe/patches/series"
 
 cd -- "$source_dir"
 if [ "$mode" = prepare ]; then

@@ -21,8 +21,21 @@ These November 26, 2026 tests used a separate, locally adapted Cool Fox build on
 | Check | Observed result |
 | --- | --- |
 | Mesh rendering test | Direct dispatch and bounded indirect dispatch both drew a triangle into an 8 × 8 render target. GPU readback returned the expected white and black pixels. |
-| First heavy scene | In one guarded run, all 113 logged mesh calls returned at the graphics API. The last captured frame before the heavy draws was black. A visible scene and character control remain unverified in this build. |
+| First heavy scene | In one guarded run, all 113 logged mesh calls returned at the graphics API. Its last captured frame was black. A separate Series S run showed a character and a lit street with artifacts before the memory guard ended the run at 110 seconds. |
 | Memory and synchronization | In another run, texture and staging pools grew by about 2 GiB ahead of the first heavy scene. A separate live stack showed one mesh-recording thread waiting for a read lock. The cause of the rendering stall is still open. |
+| Shader export ordering | All 204 enabled shader tests passed. The subsequent native-window trial ended with a read fault. Other Cool Fox crash reports identify the same D3DMetal vertex-buffer binding function. |
+
+## ScarlettMac Runtime Preview checkpoint
+
+The November 26 Series S checkpoint passed its CrossOver configuration and executable inspection checks. In a native-window trial on the M3 Max, the launcher detected the offline picker. GameInput consumed the confirmation and the game moved into story loading. The game later stopped during a timing check.
+
+| Experiment | Result |
+| --- | --- |
+| Normal GPU submission | Disabling per-list profiling still led to the same timed abort. |
+| Round-based GPU atomic locks | Story loading continued with multi-second delays in title-memory preparation. The game hit the same timing check. |
+| Full-copy title-memory refresh | This removed the multi-second page-protection delays. The measured heap-texture upload step still took about 5 seconds of wall time in one slow interval, and the game stopped. |
+
+The [source checkpoint](../runtime-preview/BUILD.md#november-26-source-checkpoint) includes Metal mesh-output validation, GPU wait diagnostics, and optional GameInput tracing. The trace can verify the stick values returned to the game. A rendered response to those values remains to be verified.
 
 ## Recent development tests
 
