@@ -22,7 +22,9 @@ tree=$root/.build/wt-$name
 [[ -d $src ]] || { print -u2 "no prepared source at $src (run runtime-preview/build.sh --checkpoint --prepare)"; exit 1 }
 [[ -e $tree ]] && { print -u2 "$tree already exists"; exit 1 }
 
-git -C "$src" worktree add -q --detach "$tree" HEAD
+pin=$(sed -n 2p "$root/runtime-preview/checkpoint/UPSTREAM")
+git -C "$src" fetch -q upstream "$pin" 2>/dev/null || true
+git -C "$src" worktree add -q --detach "$tree" "$pin"
 git -C "$tree" checkout -q -b "work/$name"
 
 while IFS= read -r p; do
@@ -30,7 +32,7 @@ while IFS= read -r p; do
     git -C "$tree" apply --index "$patches/$p"
 done < "$patches/series"
 git -C "$tree" -c user.name=ScarlettMac -c user.email=scarlettmac@local \
-    commit -q -m "Checkpoint base: the four November 26 checkpoint patches"
+    commit -q -m "Checkpoint base: runtime-preview/checkpoint/patches/series"
 
 [[ -d $src/target ]] && cp -R "$src/target" "$tree/target"
 

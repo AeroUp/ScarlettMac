@@ -23,7 +23,7 @@ cargo test --locked -j 2 -p victory-gpu --lib snapshot_pool
 
 ## November 26 source checkpoint
 
-The optional checkpoint uses a newer [VIctory-macOS revision](checkpoint/UPSTREAM) and its own [patch list](checkpoint/patches/series). It adds local GameInput diagnostics and updates mesh pipeline handling under Wine. Use the same toolchain and choose a new output directory for each command.
+The optional checkpoint uses a newer [VIctory-macOS revision](checkpoint/UPSTREAM) and its own [patch list](checkpoint/patches/series). It adds local GameInput diagnostics, updates mesh pipeline handling under Wine, copies only the title pages that were written, and translates the console's 64-lane wave reductions, first-lane and cross-half lane reads for the Mac's 32-lane GPU (`VICTORY_WAVE64_REDUCE=1`), which is what lets the world's lighting passes run. Use the same toolchain and choose a new output directory for each command.
 
 ```sh
 ./build.sh --checkpoint --prepare "$HOME/scarlettmac-checkpoint-review"
