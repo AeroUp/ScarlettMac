@@ -33,7 +33,7 @@ if [[ $# -gt 0 && ( $mode != run || $1 != -- ) ]]; then
 fi
 game_root=${game:h}
 app=${SCARLETT_CROSSOVER_APP:-/Applications/CrossOver Preview.app}
-wine="$app/Contents/SharedSupport/CrossOver/bin/wine"
+wine="${app:A}/Contents/SharedSupport/CrossOver/bin/wine"
 bottle=${SCARLETT_BOTTLE_DIR:-$HOME/Library/Application Support/CrossOver/Bottles/ScarlettLab}
 bottle=${bottle:A}
 compiled="$root/.build/$source/target/x86_64-pc-windows-gnullvm/release/xcl.exe"
