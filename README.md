@@ -2,32 +2,46 @@
 
 <a name="captured-on-mac"></a>
 
-## Latest captures
+<a name="latest-captures"></a>
+
+## Major breakthroughs on Apple Silicon
+
+**November 26, 2026.** Experimental Series S builds on a MacBook Pro with M3 Max reached two new visual milestones in the final game image.
 
 <table>
   <tr>
-    <td><a href="assets/captures/prologue-character-close-up.png"><img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening"></a><br><strong>Opening character close-up</strong></td>
-    <td><a href="assets/captures/prologue-prison-yard.png"><img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower"></a><br><strong>Prologue prison yard</strong></td>
-  </tr>
-  <tr>
-    <td><a href="assets/captures/development-skyline.png"><img src="assets/captures/development-skyline.png" width="360" alt="Partially rendered skyline with broken lighting and geometry"></a><br><strong>Skyline after shader fixes</strong></td>
-    <td><a href="assets/captures/development-pause-menu.png"><img src="assets/captures/development-pause-menu.png" width="360" alt="The GTA VI pause menu open over the opening cinematic"></a><br><strong>Pause menu during the opening</strong></td>
-  </tr>
-  <tr>
-    <td><a href="assets/captures/opening-cinematic.png"><img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic"></a><br><strong>Rendered 3D opening</strong></td>
-    <td><a href="assets/captures/opening-title-card.png"><img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago"></a><br><strong>Opening title card</strong></td>
-  </tr>
-  <tr>
-    <td><a href="assets/captures/xcl-loading-artwork.png"><img src="assets/captures/xcl-loading-artwork.png" width="360" alt="Illustrated GTA VI loading screen captured through XCL"></a><br><strong>World loading</strong></td>
-    <td><a href="assets/captures/setup-menu.png"><img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls"></a><br><strong>Finish Setup</strong></td>
-  </tr>
-  <tr>
-    <td><a href="assets/captures/subtitles-menu.png"><img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected"></a><br><strong>Subtitle settings</strong></td>
-    <td><a href="assets/captures/navigation-menu.png"><img src="assets/captures/navigation-menu.png" width="360" alt="GTA VI Navigation Experience menu with Minimap set to Dynamic"></a><br><strong>Navigation settings</strong></td>
+    <td><a href="assets/captures/prologue-character-close-up.png"><img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening"></a><br><img src="https://img.shields.io/badge/First%20character%20close--up%20on%20MacBook-D1242F?style=for-the-badge" alt="First character close-up on MacBook"><br>ScarlettMac’s first clearly rendered character close-up on the M3 Max MacBook Pro. The Series S Cool Fox run captured the scene after leaving the loading screen.</td>
+    <td><a href="assets/captures/prologue-prison-yard.png"><img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower"></a><br><strong>Prologue prison yard</strong><br>Two Series S runs rendered the saved Prologue yard in the final game image, with fences and a distant watchtower. AMD FSR 3.1.6 processed the game’s 720p render into 1080p output. Lighting remains overexposed.</td>
   </tr>
 </table>
 
-The skyline still shows severe lighting and geometry artifacts.
+> [!WARNING]
+> **In development.** GTA VI gameplay is currently unavailable. Walking and camera control in a visible scene remain unverified.
+
+[Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
+
+## Earlier captures
+
+These images are from earlier tests, before the character close-up and the saved-Prologue yard. They are ordered from newer native-window tests down to the earliest XCL setup screens.
+
+<table>
+  <tr>
+    <td><a href="assets/captures/development-skyline.png"><img src="assets/captures/development-skyline.png" width="360" alt="Partially rendered skyline with broken lighting and geometry"></a><br><strong>Skyline after shader fixes</strong><br>An earlier native-window run drew part of the skyline after shader fixes. Lighting and geometry artifacts were still severe.</td>
+    <td><a href="assets/captures/development-pause-menu.png"><img src="assets/captures/development-pause-menu.png" width="360" alt="The GTA VI pause menu open over the opening cinematic"></a><br><strong>Pause menu during the opening</strong><br>An earlier test opened the pause menu over the live opening. Closing the menu resumed the scene.</td>
+  </tr>
+  <tr>
+    <td><a href="assets/captures/opening-cinematic.png"><img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic"></a><br><strong>Rendered 3D opening</strong><br>An earlier experimental run rendered a car and driver silhouetted against the sky during the opening replay.</td>
+    <td><a href="assets/captures/opening-title-card.png"><img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago"></a><br><strong>Opening title card</strong><br>The title card appeared after the experimental renderer moved past the loading artwork.</td>
+  </tr>
+  <tr>
+    <td><a href="assets/captures/xcl-loading-artwork.png"><img src="assets/captures/xcl-loading-artwork.png" width="360" alt="Illustrated GTA VI loading screen captured through XCL"></a><br><strong>World loading</strong><br>The earlier XCL build reached world loading, displayed the artwork, and read scene assets.</td>
+    <td><a href="assets/captures/setup-menu.png"><img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls"></a><br><strong>Finish Setup</strong><br>The earlier XCL run reached the end of first-run setup, with Settings, Continue, and Back visible.</td>
+  </tr>
+  <tr>
+    <td><a href="assets/captures/subtitles-menu.png"><img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected"></a><br><strong>Subtitle settings</strong><br>The earlier XCL setup displayed subtitle settings with Medium selected.</td>
+    <td><a href="assets/captures/navigation-menu.png"><img src="assets/captures/navigation-menu.png" width="360" alt="GTA VI Navigation Experience menu with Minimap set to Dynamic"></a><br><strong>Navigation settings</strong><br>The early XCL setup displayed Navigation Experience with the Dynamic minimap selected.</td>
+  </tr>
+</table>
 
 [Replay details](docs/compatibility.md#scarlettmac-opening-cinematic) · [Development test results](docs/compatibility.md#recent-development-tests)
 
@@ -43,15 +57,6 @@ ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Sil
 [Build and run XCL](#build-and-run) · [Runtime preview](runtime-preview/BUILD.md) · [Compatibility results](docs/compatibility.md)
 
 ## GTA VI status
-
-> [!WARNING]
-> **In development.** GTA VI gameplay is currently unavailable.
-
-### Major breakthroughs on Apple Silicon
-
-**November 26, 2026** · The saved Prologue rendered in the final game output on an Apple M3 Max. Two Series S runs showed the yard with fences and a watchtower. The game used AMD FSR 3.1.6 to upscale from 720p to 1080p. A separate Cool Fox run rendered a lit character close-up after the loading screen.
-
-The yard still has severe lighting artifacts. Walking and camera control in a visible scene remain unverified. [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
 
 | Build tested on M3 Max | Latest verified result |
 | --- | --- |
