@@ -24,6 +24,7 @@ Standard library only. Read-only: the logs are never modified.
 """
 
 import argparse
+import glob
 import os
 import re
 import statistics
@@ -444,11 +445,69 @@ def report_cost(info, mean_fps, steady_fps):
           " blocks the present; copystat's 'preparing' equals it to within 0.1 ms)")
 
 
+# ------------------------------------------------------------------- crashes
+
+# The title's own crash log, in the Wine prefix, is the only place a process
+# death is recorded: a log that simply stops looks identical to a stall.
+def crash_log_path():
+    pattern = os.path.expanduser(
+        "~/ScarlettWine/drive_c/users/*/AppData/Local/victory/data/*/crashes.log")
+    found = [p for p in glob.glob(pattern) if os.path.getsize(p) > 0]
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def read_crashes(path):
+    """[(when, process, message)] from a crashes.log (unix seconds)."""
+    entries = []
+    when = None
+    process = None
+    try:
+        handle = open(path, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        return entries
+    with handle:
+        for line in handle:
+            match = re.match(r"unix time (\d+), process (\d+)", line)
+            if match:
+                when, process = int(match.group(1)), int(match.group(2))
+                continue
+            if when is not None and line.startswith("VIctory: "):
+                entries.append((when, process, line.strip()))
+                when = None
+    return entries
+
+
+def report_crashes(info, path):
+    if not path:
+        return
+    rule("0. did the process die")
+    entries = read_crashes(path)
+    if not entries:
+        print("  no crash entries in %s" % path)
+        return
+    first, last = info["first_ts"], info["last_ts"]
+    window = []
+    for when, process, message in entries:
+        seen = datetime.fromtimestamp(when, tz=timezone.utc)
+        if first and last and (first - timedelta(seconds=120)) <= seen <= (last + timedelta(seconds=180)):
+            window.append((seen, process, message))
+    if window:
+        for seen, process, message in window:
+            print("  DIED at %s (pid %d): %s" % (clock(seen), process, message[:160]))
+        print("  This run did not end because the title stopped drawing: the process"
+              " faulted. Frames after the last present line are missing, not stalled.")
+    else:
+        newest = datetime.fromtimestamp(entries[-1][0], tz=timezone.utc)
+        print("  no crash inside this run's window (newest entry in the file: %s)"
+              % clock(newest))
+
+
 def report(path, bucket):
     info = read_log(path)
     print("=" * 78)
     print("%s  (%d bytes, %d lines)" % (path, info["bytes"], info["lines"]))
     print("=" * 78)
+    report_crashes(info, crash_log_path())
     report_presents(info)
     summary = report_summary(info)
     report_refreshes(info)
