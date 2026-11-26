@@ -20,13 +20,15 @@ seconds=600
 game="/Users/aero/Downloads/ISOs/GTA6 Xbox personal/game_scarlett_master.exe"
 runtime=$root/.build/checkpoint-src/target/x86_64-pc-windows-gnullvm/diag
 tag=
+wait=0
 while [[ $# -gt 0 ]]; do
     case $1 in
         --seconds) seconds=$2; shift 2 ;;
         --game) game=$2; shift 2 ;;
         --runtime) runtime=$2; shift 2 ;;
         --tag) tag=$2; shift 2 ;;
-        *) print -u2 "Usage: $0 [--seconds N] [--game PATH] [--runtime DIR] [--tag NAME]"; exit 2 ;;
+        --wait) wait=$2; shift 2 ;;
+        *) print -u2 "Usage: $0 [--seconds N] [--game PATH] [--runtime DIR] [--tag NAME] [--wait N]"; exit 2 ;;
     esac
 done
 
@@ -39,13 +41,23 @@ prefix=${SCARLETT_PREFIX:-$HOME/ScarlettWine}
 [[ -f $runtime/libunwind.dll ]] || { print -u2 "libunwind.dll missing beside the runtime"; exit 1; }
 
 # One title at a time. The lock is a directory: atomic, and its owner is in it.
+# --wait N queues this run behind one already going, for up to N seconds, so
+# several workers can share the Mac without polling the lock by hand.
 lock=$root/.build/run.lock
-if ! mkdir "$lock" 2>/dev/null; then
-    print -u2 "A run is already going (or a stale lock at $lock)."
-    print -u2 "If nothing is running: rm -rf '$lock'"
-    exit 1
-fi
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+    if [[ $waited -ge $wait ]]; then
+        print -u2 "A run is already going (or a stale lock at $lock)."
+        print -u2 "If nothing is running: rm -rf '$lock'"
+        exit 1
+    fi
+    sleep 2
+    waited=$((waited + 2))
+done
 trap 'rm -rf "$lock"' EXIT
+if [[ $waited -gt 0 ]]; then
+    print "waited ${waited}s for the single-instance lock"
+fi
 
 # One title at a time; the lock above is the guard. (A pgrep for the guest
 # image also matches any wrapper whose command line names it, including this
