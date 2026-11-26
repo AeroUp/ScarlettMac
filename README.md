@@ -29,6 +29,10 @@ Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress,
 
 The yard still has severe lighting artifacts. Walking and camera control in a visible scene remain unverified. [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
 
+| Prologue prison yard | Opening character close-up |
+| --- | --- |
+| [<img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower">](assets/captures/prologue-prison-yard.png) | [<img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening">](assets/captures/prologue-character-close-up.png) |
+
 **GTA VI reaches world loading through XCL on the M3 Max. Tests with a separate experimental runtime rendered the live 3D opening and verified pause and resume input.**
 
 The 3D opening ran below 1 FPS and showed severe rendering artifacts. Player movement and camera control remain unverified. These development tests used a local runtime configuration with additional patches. [Development test results](docs/compatibility.md#recent-development-tests)
