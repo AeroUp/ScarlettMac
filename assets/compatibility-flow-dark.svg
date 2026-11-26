@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="720" height="204" viewBox="0 0 720 204" role="img" aria-labelledby="title desc">
-  <title id="title">How ScarlettMac runs an Xbox Series game</title>
-  <desc id="desc">ScarlettMac uses XCL to supply Xbox system services. On the Mac, Rosetta 2 runs x64 CPU code and D3DMetal runs the translated graphics on the Apple GPU.</desc>
+  <title id="title">ScarlettMac XCL compatibility flow</title>
+  <desc id="desc">In ScarlettMac's XCL build, XCL supplies Xbox system services. Rosetta 2 runs x64 CPU code and D3DMetal runs the translated graphics on the Apple GPU.</desc>
   <rect x=".5" y=".5" width="719" height="203" rx="12" fill="#0d1117" stroke="#30363d"/>
   <path d="M207 102h38m193 0h24v-45h26m-26 45v45h26" fill="none" stroke="#8b949e" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="m240 97 8 5-8 5zm246-45 8 5-8 5zm0 90 8 5-8 5z" fill="#8b949e"/>
