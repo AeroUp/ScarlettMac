@@ -13,12 +13,23 @@
 
 ## Major breakthroughs on Apple Silicon
 
-**November 26, 2026.** The latest captures show ScarlettMac’s first clearly rendered character close-up on a MacBook and a third-person night street scene.
+<p align="center">
+  <img src="https://img.shields.io/badge/First%20character%20close--up%20on%20MacBook-D1242F?style=for-the-badge" alt="First character close-up on MacBook"><br>
+  <sub>November 26, 2026</sub>
+</p>
 
 <table>
   <tr>
-    <td><a href="assets/captures/prologue-character-close-up.png"><img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening"></a><br><img src="https://img.shields.io/badge/First%20character%20close--up%20on%20MacBook-D1242F?style=for-the-badge" alt="First character close-up on MacBook"><br>ScarlettMac’s first clearly rendered character close-up on the M3 Max MacBook Pro. The Series S Cool Fox run captured the scene after leaving the loading screen.</td>
-    <td><a href="assets/captures/night-street-scene.png"><img src="assets/captures/night-street-scene.png" width="360" alt="Third-person view of a character beside a car on a night street with a brightly lit building"></a><br><strong>Night street scene</strong><br>The night scene shows a rendered character, a car, and a brightly lit building from a third-person view.</td>
+    <td width="50%" align="center">
+      <a href="assets/captures/prologue-character-close-up.png"><img src="assets/captures/prologue-character-close-up.png" width="400" alt="Warm-lit character close-up during the opening"></a>
+    </td>
+    <td width="50%" align="center">
+      <a href="assets/captures/night-street-scene.png"><img src="assets/captures/night-street-scene.png" width="400" alt="Third-person view of a character beside a car on a night street with a brightly lit building"></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Opening character close-up</strong><br>Series S opening rendered on an M3 Max MacBook Pro.</td>
+    <td align="center"><strong>Night street scene</strong><br>Third-person view of the character, car, and street lighting.</td>
   </tr>
 </table>
 
