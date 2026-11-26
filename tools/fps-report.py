@@ -576,6 +576,24 @@ def metrics(info):
     return values
 
 
+def span_fps(info):
+    """{(from_frame, to_frame): fps} from consecutive present lines.
+
+    Presents are logged only at power-of-two frame counts, so these spans are
+    the finest common ground two runs have: a run killed at frame 273 and one
+    killed at 3952 can still be compared over 1-256.
+    """
+    rows = {}
+    presents = info["presents"]
+    for index in range(1, len(presents)):
+        before_t, before_f = presents[index - 1][0], presents[index - 1][1]
+        after_t, after_f = presents[index][0], presents[index][1]
+        span = (after_t - before_t).total_seconds()
+        if span > 0 and after_f > before_f:
+            rows[(before_f, after_f)] = (after_f - before_f) / span
+    return rows
+
+
 def report_compare(base, other, base_name, other_name):
     before, after = metrics(base), metrics(other)
     print("=" * 78)
@@ -600,6 +618,23 @@ def report_compare(base, other, base_name, other_name):
             print("  %-38s %12.0f %12.0f %10s" % (name, b, a, change))
         else:
             print("  %-38s %12.2f %12.2f %10s" % (name, b, a, change))
+
+    # The same frame spans in both runs: the honest comparison when one run
+    # died earlier than the other.
+    spans_before, spans_after = span_fps(base), span_fps(other)
+    common = sorted(set(spans_before) & set(spans_after))
+    if common:
+        print()
+        print("  fps over the same frame spans (both runs reached them):")
+        print("  %-17s %10s %10s %10s" % ("frames", "before", "after", "change"))
+        for span in common:
+            b, a = spans_before[span], spans_after[span]
+            print("  %-17s %10.2f %10.2f %9.1f%%"
+                  % ("%d-%d" % span, b, a, 100.0 * (a - b) / b if b else 0.0))
+        mb, ma = statistics.mean(spans_before[s] for s in common), statistics.mean(
+            spans_after[s] for s in common)
+        print("  %-17s %10.2f %10.2f %9.1f%%"
+              % ("mean of those", mb, ma, 100.0 * (ma - mb) / mb if mb else 0.0))
     print()
     print("  A change is a win only if the metric it targets moved and the image did not")
     print("  regress; higher is better for fps and frames, lower for everything else.")
