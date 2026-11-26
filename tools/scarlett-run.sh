@@ -32,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+runtime=${runtime:A}   # absolute: the launch below changes into it
 exe=$runtime/victory.exe
 wine=${SCARLETT_WINE:-$HOME/Library/Caches/victory-macos/target/wine-cx/bin/wine}
 prefix=${SCARLETT_PREFIX:-$HOME/ScarlettWine}
