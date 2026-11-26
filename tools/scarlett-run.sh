@@ -51,6 +51,15 @@ prefix=${SCARLETT_PREFIX:-$HOME/ScarlettWine}
 lock=$root/.build/run.lock
 waited=0
 until mkdir "$lock" 2>/dev/null; do
+    # The owner's pid is in the lock. A launcher that was killed (SIGKILL
+    # skips the trap below) leaves the lock behind with nobody running: if
+    # its owner is gone, the lock is stale and is taken over.
+    owner=$(cat "$lock/pid" 2>/dev/null)
+    if [[ -n $owner ]] && ! kill -0 "$owner" 2>/dev/null; then
+        print "the lock's owner (pid $owner) is gone: taking the stale lock over"
+        rm -f "$lock/pid"; rmdir "$lock" 2>/dev/null
+        continue
+    fi
     if [[ $waited -ge $wait ]]; then
         print -u2 "A run is already going (or a stale lock at $lock)."
         print -u2 "If nothing is running: rm -rf '$lock'"
@@ -60,6 +69,7 @@ until mkdir "$lock" 2>/dev/null; do
     waited=$((waited + 2))
 done
 trap 'rm -rf "$lock"' EXIT
+print $$ > "$lock/pid"
 if [[ $waited -gt 0 ]]; then
     print "waited ${waited}s for the single-instance lock"
 fi
