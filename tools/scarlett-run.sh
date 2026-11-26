@@ -129,8 +129,12 @@ writer=$!
 (
     sleep "$seconds"
     kill "$writer" 2>/dev/null || true
-    pkill -f "game_scarlett_master.exe" 2>/dev/null || true
+    # Only this run's own title: its wine process, then this prefix's server
+    # (one run at a time holds the lock, so the prefix is ours). Never a
+    # pkill by name, which also closed other workers' titles.
     kill "$wine_pid" 2>/dev/null || true
+    sleep 2
+    WINEPREFIX=$prefix "${wine:h}/wineserver" -k 2>/dev/null || true
 ) &
 limiter=$!
 
