@@ -17,7 +17,8 @@ set -eu
 
 root=${0:A:h:h}
 seconds=600
-game="/Users/aero/Downloads/ISOs/GTA6 Xbox personal/game_scarlett_master.exe"
+# Your own dump of the title: SCARLETT_GAME=/path/to/game_scarlett_master.exe
+game=${SCARLETT_GAME:-"$HOME/Downloads/ISOs/GTA6 Xbox personal/game_scarlett_master.exe"}
 runtime=$root/.build/checkpoint-src/target/x86_64-pc-windows-gnullvm/diag
 tag=
 wait=0
