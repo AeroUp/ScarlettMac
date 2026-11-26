@@ -489,7 +489,11 @@ def report_crashes(info, path):
     window = []
     for when, process, message in entries:
         seen = datetime.fromtimestamp(when, tz=timezone.utc)
-        if first and last and (first - timedelta(seconds=120)) <= seen <= (last + timedelta(seconds=180)):
+        # Runs now queue back to back, so the window must not reach into the
+        # previous run (a fault cannot precede this run's first line; the
+        # crash file stamps whole seconds) nor far into the next one (the
+        # title's own dump writer faults within seconds of the first fault).
+        if first and last and (first - timedelta(seconds=2)) <= seen <= (last + timedelta(seconds=45)):
             window.append((seen, process, message))
     if window:
         for seen, process, message in window:
