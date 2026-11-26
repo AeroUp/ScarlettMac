@@ -10,7 +10,7 @@ time and interval, draws, copy cost, the queue, and CPU / RAM / swap / GPU.
   tools/scarlett-hud.py --stream  a frame every 0.1 s, form-feed separated (the window uses this)
   tools/scarlett-hud.sh           opens it in an always-on-top window
 """
-import glob, os, re, subprocess, sys, time
+import glob, os, re, subprocess, sys, threading, time
 from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -220,6 +220,29 @@ def system():
                 gpu_mem=int(gpu_mem.group(1)) if gpu_mem else None)
 
 
+FOOT = {"total": None, "gpu": None, "title": None, "heap": None}
+
+
+def footprint_loop():
+    """footprint(1) of the title: the real memory it holds (RSS misses most of
+    it). It takes over a second, so it runs every 5 s on its own thread."""
+    unit = {"KB": 2**10, "MB": 2**20, "GB": 2**30, "B": 1}
+    while True:
+        pid = next((l.split()[0] for l in sh(["ps", "-axo", "pid=,command="]).splitlines()
+                    if "victory.exe run" in l), None)
+        if pid is None:
+            FOOT.update(total=None, gpu=None, title=None, heap=None)
+        else:
+            out = sh(["footprint", "-p", pid]) if pid else ""
+            def size(pat):
+                m = re.search(r"(\d+(?:\.\d+)?) (B|KB|MB|GB)\s+\S+ \S+\s+\S+ \S+\s+\d+\s+" + pat, out)
+                return float(m.group(1)) * unit[m.group(2)] if m else None
+            t = re.search(r"Footprint: ([\d.]+) (KB|MB|GB)", out)
+            FOOT.update(total=float(t.group(1)) * unit[t.group(2)] if t else None,
+                        gpu=size(r"IOAccelerator"), title=size(r"WINE_RESERVE"), heap=size(r"Malloc Medium"))
+        time.sleep(5)
+
+
 def gb(n):
     return f"{n / 2**30:5.1f} GB"
 
@@ -273,7 +296,10 @@ def render():
     m = slow["system"]
     out.append(f" CPU   {bar(m['cpu'] / 100, 24)} {m['cpu']:5.1f}%  title {m['title_cpu']:.0f}%  wineserver {m['wine_cpu']:.0f}%")
     out.append(f" RAM   {bar(m['ram_used'] / m['ram_total'], 24)} {gb(m['ram_used'])} / {gb(m['ram_total']).strip()}")
-    out.append(f"       title {gb(m['title_rss']).strip()}   swap {m['swap_mb'] / 1024:.1f} GB")
+    out.append(f"       swap {m['swap_mb'] / 1024:.1f} GB")
+    if FOOT["total"]:
+        f = lambda k: gb(FOOT[k]).strip() if FOOT[k] else "?"
+        out.append(f" title footprint {f('total')}: GPU {f('gpu')}  title mem {f('title')}  heap {f('heap')}")
     if m["gpu"] is not None:
         gm = f"   GPU mem {gb(m['gpu_mem']).strip()}" if m["gpu_mem"] else ""
         out.append(f" GPU   {bar(m['gpu'] / 100, 24)} {m['gpu']:3d}%{gm}")
@@ -281,6 +307,7 @@ def render():
 
 
 def main():
+    threading.Thread(target=footprint_loop, daemon=True).start()
     if "--once" in sys.argv:
         print(render())
         return
