@@ -69,8 +69,28 @@ both runs with the change, including the counts of dropped work above. A change
 counts as a win only when the quantity it targets moves and the presented image
 does not regress.
 
-## What this baseline does not establish
+## Correction: the world is reached, the runs were too short
 
-Sustained 3D rendering, walking, camera control and gameplay remain unverified
-on this track. Earlier experimental runtimes on an M3 Max with CrossOver
-Preview reached 3D frames; this runtime-preview track has not.
+The first version of this page said no 3D world had been captured on this
+track. That was a run-length artifact, and the title's own state dump disproves
+it. A run on the same build reached the Prologue intro and then crashed; its
+dump (`victory-20261126-122527-648.crash.log` in the Wine prefix) records:
+
+| Field | Value |
+| --- | --- |
+| Game running time | 0h:3m:50s |
+| Frame | 1379 |
+| Game state | Game Running |
+| Mission | fbk_stry000_FBK_STRY000_INTRO |
+| Streaming requests | 899, TileHeap 3442 MB of 6236 MB |
+| World content | 8520 buildings, 244 vehicles, 87 peds, 630 lights |
+| Player position | <1828.58, 139.66, 2.80> |
+
+The exception was `0xc0000005` at game image `+0x23cf683`, a write to address
+0, followed by a second fault inside `dbghelp.dll` while the runtime reported
+it. So the run stops presenting because the process dies.
+
+Consequences for measurement: runs must last at least 300 s to reach the world,
+screenshots must be taken at 220-270 s, and every run's last frame number has to
+be reported, because a crash makes fps totals incomparable.
+
