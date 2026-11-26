@@ -29,7 +29,8 @@ LLVM_MINGW_ROOT=/Users/aero/Documents/ScarlettMac/.toolchain/llvm-mingw-20261117
 
 One title at a time, always through `tools/scarlett-run.sh`. `--wait N` queues
 behind a run already going instead of retrying by hand; the lock stays the only
-guard and a stale lock is never removed automatically.
+guard. The lock holds its launcher's pid; a queued run takes over a lock
+only when that launcher is gone (killed outright, so it never released it).
 
 ```sh
 tools/scarlett-run.sh --runtime .build/wt-NAME/target/x86_64-pc-windows-gnullvm/diag \
