@@ -5,12 +5,15 @@
 [![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-04a519)](#how-it-works)
 [![XCL: World loading](https://img.shields.io/badge/XCL-World%20loading-FFD700)](#gta-vi-status)
 [![ScarlettMac 3D opening](https://img.shields.io/badge/ScarlettMac-3D%20opening-04a519)](#captured-on-mac)
+[![Discord community](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/EJKCj64geW)
 
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
 [Build and run XCL](#build-and-run) · [Runtime preview](runtime-preview/BUILD.md) · [Compatibility results](docs/compatibility.md)
 
 ## Contribute
+
+Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress, compare test results, and chat with contributors.
 
 > [!IMPORTANT]
 > Help test ScarlettMac on more Apple Silicon Macs. You can run the synthetic Xbox test title, report a compatibility result, or improve the setup instructions. [Contributor guide](CONTRIBUTING.md) · [Open a report](https://github.com/paveledits/ScarlettMac/issues/new/choose)
