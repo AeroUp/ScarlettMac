@@ -13,12 +13,12 @@
 
 ## Major breakthroughs on Apple Silicon
 
-**November 26, 2026.** Experimental Series S builds on a MacBook Pro with M3 Max reached two new visual milestones in the final game image.
+**November 26, 2026.** The latest captures show ScarlettMac’s first clearly rendered character close-up on a MacBook and a third-person night street scene.
 
 <table>
   <tr>
     <td><a href="assets/captures/prologue-character-close-up.png"><img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening"></a><br><img src="https://img.shields.io/badge/First%20character%20close--up%20on%20MacBook-D1242F?style=for-the-badge" alt="First character close-up on MacBook"><br>ScarlettMac’s first clearly rendered character close-up on the M3 Max MacBook Pro. The Series S Cool Fox run captured the scene after leaving the loading screen.</td>
-    <td><a href="assets/captures/prologue-prison-yard.png"><img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower"></a><br><strong>Prologue prison yard</strong><br>Two Series S runs rendered the saved Prologue yard in the final game image, with fences and a distant watchtower. AMD FSR 3.1.6 processed the game’s 720p render into 1080p output. Lighting remains overexposed.</td>
+    <td><a href="assets/captures/night-street-scene.png"><img src="assets/captures/night-street-scene.png" width="360" alt="Third-person view of a character beside a car on a night street with a brightly lit building"></a><br><strong>Night street scene</strong><br>The night scene shows a rendered character, a car, and a brightly lit building from a third-person view.</td>
   </tr>
 </table>
 
@@ -29,7 +29,7 @@
 
 ## Earlier captures
 
-These images are from earlier tests, before the character close-up and the saved-Prologue yard. They are ordered from newer native-window tests down to the earliest XCL setup screens.
+These images are from tests that preceded the captures above. They are ordered from newer native-window tests down to the earliest XCL setup screens.
 
 <table>
   <tr>
