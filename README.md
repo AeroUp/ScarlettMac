@@ -1,5 +1,11 @@
 # ScarlettMac
 
+## Latest captures
+
+| Opening character close-up | Prologue prison yard |
+| --- | --- |
+| [<img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening">](assets/captures/prologue-character-close-up.png) | [<img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower">](assets/captures/prologue-prison-yard.png) |
+
 [![macOS: Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-0091FF)](#tested-on-mac)
 [![Tested on M3 Max](https://img.shields.io/badge/Tested-M3%20Max-5832A8)](#tested-on-mac)
 [![Graphics: D3DMetal](https://img.shields.io/badge/Graphics-D3DMetal-04a519)](#how-it-works)
@@ -10,13 +16,6 @@
 ScarlettMac is an experimental Xbox Series X|S compatibility layer for Apple Silicon Macs, built on XCL and CrossOver. [XCL](https://github.com/xcl-dev/xcl)
 
 [Build and run XCL](#build-and-run) · [Runtime preview](runtime-preview/BUILD.md) · [Compatibility results](docs/compatibility.md)
-
-## Contribute
-
-Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress, compare test results, and chat with contributors.
-
-> [!IMPORTANT]
-> Help test ScarlettMac on more Apple Silicon Macs. You can run the synthetic Xbox test title, report a compatibility result, or improve the setup instructions. [Contributor guide](CONTRIBUTING.md) · [Open a report](https://github.com/paveledits/ScarlettMac/issues/new/choose)
 
 ## GTA VI status
 
@@ -29,39 +28,9 @@ Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress,
 
 The yard still has severe lighting artifacts. Walking and camera control in a visible scene remain unverified. [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
 
-| Prologue prison yard | Opening character close-up |
-| --- | --- |
-| [<img src="assets/captures/prologue-prison-yard.png" width="360" alt="Prologue prison yard with wire fences and a distant watchtower">](assets/captures/prologue-prison-yard.png) | [<img src="assets/captures/prologue-character-close-up.png" width="360" alt="Warm-lit character close-up during the opening">](assets/captures/prologue-character-close-up.png) |
-
 **GTA VI reaches world loading through XCL on the M3 Max. Tests with a separate experimental runtime rendered the live 3D opening and verified pause and resume input.**
 
 The 3D opening ran below 1 FPS and showed severe rendering artifacts. Player movement and camera control remain unverified. These development tests used a local runtime configuration with additional patches. [Development test results](docs/compatibility.md#recent-development-tests)
-
-### Captured on Mac
-
-**XCL** reached first-run setup and world loading on an M3 Max.
-
-| Navigation settings | World loading |
-| --- | --- |
-| [<img src="assets/captures/navigation-menu.png" width="360" alt="GTA VI Navigation Experience menu with Minimap set to Dynamic">](assets/captures/navigation-menu.png) | [<img src="assets/captures/xcl-loading-artwork.png" width="360" alt="Illustrated GTA VI loading screen captured through XCL">](assets/captures/xcl-loading-artwork.png) |
-
-| Subtitle settings | Finish Setup |
-| --- | --- |
-| [<img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected">](assets/captures/subtitles-menu.png) | [<img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls">](assets/captures/setup-menu.png) |
-
-The experimental **ScarlettMac** runtime captured the title card and the rendered opening scene.
-
-| Opening title card | Rendered 3D opening |
-| --- | --- |
-| [<img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago">](assets/captures/opening-title-card.png) | [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) |
-
-Later native-window tests captured the pause menu during the opening and a partially rendered skyline. The skyline still shows severe lighting and geometry artifacts.
-
-| Pause menu during the opening | Skyline after shader fixes |
-| --- | --- |
-| [<img src="assets/captures/development-pause-menu.png" width="360" alt="The GTA VI pause menu open over the opening cinematic">](assets/captures/development-pause-menu.png) | [<img src="assets/captures/development-skyline.png" width="360" alt="Partially rendered skyline with broken lighting and geometry">](assets/captures/development-skyline.png) |
-
-[Replay details](docs/compatibility.md#scarlettmac-opening-cinematic) · [Development test results](docs/compatibility.md#recent-development-tests)
 
 ### XCL launch milestones
 
@@ -74,6 +43,13 @@ Later native-window tests captured the pause menu during the opening and a parti
 </picture>
 
 [Compatibility measurements and reproduction steps](docs/compatibility.md)
+
+## Contribute
+
+Join the [ScarlettMac Discord](https://discord.gg/EJKCj64geW) to share progress, compare test results, and chat with contributors.
+
+> [!IMPORTANT]
+> Help test ScarlettMac on more Apple Silicon Macs. You can run the synthetic Xbox test title, report a compatibility result, or improve the setup instructions. [Contributor guide](CONTRIBUTING.md) · [Open a report](https://github.com/paveledits/ScarlettMac/issues/new/choose)
 
 ## How it works
 
@@ -125,3 +101,35 @@ Build the independent VIctory-macOS runtime for CrossOver on Apple Silicon. The 
 This project builds on XCL by ivall and the macOS work by utkarshxdev. [ivall/xcl](https://github.com/ivall/xcl), [utkarshxdev/xcl-mac](https://github.com/utkarshxdev/xcl-mac)
 
 The XCL-derived patches are distributed under GPL-2.0-only. See [LICENSE](LICENSE).
+
+## Captured on Mac
+
+### Native-window tests
+
+Native-window tests captured a partially rendered skyline and the pause menu during the opening. The skyline still shows severe lighting and geometry artifacts.
+
+| Skyline after shader fixes | Pause menu during the opening |
+| --- | --- |
+| [<img src="assets/captures/development-skyline.png" width="360" alt="Partially rendered skyline with broken lighting and geometry">](assets/captures/development-skyline.png) | [<img src="assets/captures/development-pause-menu.png" width="360" alt="The GTA VI pause menu open over the opening cinematic">](assets/captures/development-pause-menu.png) |
+
+### Opening replay
+
+The experimental ScarlettMac runtime captured the rendered opening scene and the title card that precedes it.
+
+| Rendered 3D opening | Opening title card |
+| --- | --- |
+| [<img src="assets/captures/opening-cinematic.png" width="360" alt="A car and driver silhouetted against the sky in the rendered opening cinematic">](assets/captures/opening-cinematic.png) | [<img src="assets/captures/opening-title-card.png" width="360" alt="GTA VI title card reading Vice City, Two Years Ago">](assets/captures/opening-title-card.png) |
+
+### XCL setup and loading
+
+XCL reached first-run setup and world loading on an M3 Max.
+
+| World loading | Finish Setup |
+| --- | --- |
+| [<img src="assets/captures/xcl-loading-artwork.png" width="360" alt="Illustrated GTA VI loading screen captured through XCL">](assets/captures/xcl-loading-artwork.png) | [<img src="assets/captures/setup-menu.png" width="360" alt="GTA VI Finish Setup menu with Settings, Continue, and Back controls">](assets/captures/setup-menu.png) |
+
+| Subtitle settings | Navigation settings |
+| --- | --- |
+| [<img src="assets/captures/subtitles-menu.png" width="360" alt="GTA VI Subtitles menu with Medium selected">](assets/captures/subtitles-menu.png) | [<img src="assets/captures/navigation-menu.png" width="360" alt="GTA VI Navigation Experience menu with Minimap set to Dynamic">](assets/captures/navigation-menu.png) |
+
+[Replay details](docs/compatibility.md#scarlettmac-opening-cinematic) · [Development test results](docs/compatibility.md#recent-development-tests)

@@ -2,6 +2,49 @@
 
 Tested on an Apple M3 Max with CrossOver Preview 27.0.0.41073 and D3DMetal 4.0b3.
 
+## Prologue rendering breakthroughs
+
+On November 26, 2026, experimental runtimes on an Apple M3 Max with CrossOver and D3DMetal captured these scenes in the final game image.
+
+| Test | Verified result | Remaining limit |
+| --- | --- | --- |
+| Local Cool Fox Series S opening | [Frame 2767](../assets/captures/prologue-character-close-up.png) showed a lit character close-up after illustrated loading artwork. | The run hit a read fault at world entry before input could be verified. |
+| Series S Prologue with desktop AMD FSR | The title read the 250,880-byte Prologue save data. AMD FSR 3.1.6 upscaled the game from 1280 × 720 to 1920 × 1080. [Frame 3129](../assets/captures/prologue-prison-yard.png) showed a fenced yard and a guard tower. | Lighting was heavily overexposed. The memory guard ended the run at 179 seconds. |
+| Series S Prologue with 1080p compositing | A separate run read the same save and reproduced the yard in frame 3205, with people visible near the watchtower. The runtime blended the display layers into a 1080p output. | The memory guard ended the run at 162 seconds, before a controlled camera test. |
+
+These tests establish visible 3D output. Sustained rendering, walking, and camera control in a visible scene remain unverified. The public XCL build's measured milestone remains world loading.
+
+## Recent development tests
+
+| Area | Observed on M3 Max |
+| --- | --- |
+| Opening and input | The experimental runtime rendered the live 3D opening. A separate guarded run verified pause and resume input. Player movement and camera control remain unverified. |
+| Memory | With four expanded pools, the host presented at least 130 frames after the first visible 3D frame. Neither earlier game assertion recurred before the host memory guard ended the test. |
+| Shader translation | The runtime translated two previously unsupported pixel shaders, created their D3DMetal pipelines, and used both during the live run. |
+
+In the November 25, 2026 native-window shader test, the host presented at least 270 frames after the first frame with 3D draws. The trial reached its 20-minute time limit without repeating either earlier game assertion.
+
+| Capture | Observed on Mac |
+| --- | --- |
+| [Skyline, frame 2982](../assets/captures/development-skyline.png) | The skyline was partially rendered. Both repaired pixel shaders had already been used in this run. |
+| [Pause menu, frame 2929](../assets/captures/development-pause-menu.png) | The pause menu opened over the cinematic during a separate native-window test. The opening resumed after closing it. |
+
+The opening showed severe rendering artifacts and performance below 1 FPS. Gameplay remains unavailable.
+
+<a name="victory-opening-cinematic"></a>
+
+## ScarlettMac opening cinematic
+
+This test used a private experimental ScarlettMac runtime based on VIctory. It ran Xbox Series build 1.0.2.1 with the Series X device profile on an M3 Max with 48 GB of unified memory, CrossOver Preview, and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
+
+| Stage | Capture | Observed on Mac |
+| --- | --- | --- |
+| Rendered 3D opening | [Frame 2421](../assets/captures/opening-cinematic.png) | The camera moved through several rendered shots, including the car and driver shown here. Visual artifacts remain. |
+| Opening title card | [Frame 2383](../assets/captures/opening-title-card.png) | The opening title appeared after the game moved past the loading artwork. |
+| World loading | [Frame 2340](../assets/captures/world-loading.png) | The loading artwork appeared while the game streamed assets for the opening scene. |
+
+The safety monitor ended the capture run after 397.6 seconds when macOS reported memory pressure.
+
 ## GTA VI verification
 
 These milestones track the public XCL build. The separate experimental opening replay is documented below.
@@ -81,49 +124,6 @@ Three runs of XCL's synthetic test title returned 43, 44, and 43 passes out of 5
 | 40 | Coherent memory | Reading back two values from the write-back buffer returned zeros. |
 | 41 | Sparse uploads | The first ring-buffer upload returned different bytes than expected. |
 | 46 | DirectStorage | The read did not signal the test's D3D12 fence. |
-
-<a name="victory-opening-cinematic"></a>
-
-## ScarlettMac opening cinematic
-
-This test used a private experimental ScarlettMac runtime based on VIctory. It ran Xbox Series build 1.0.2.1 with the Series X device profile on an M3 Max with 48 GB of unified memory, CrossOver Preview, and D3DMetal 4.0 beta 3. Each image is a 1920×1080 offscreen capture from that run.
-
-| Stage | Capture | Observed on Mac |
-| --- | --- | --- |
-| World loading | [Frame 2340](../assets/captures/world-loading.png) | The loading artwork appeared while the game streamed assets for the opening scene. |
-| Opening title card | [Frame 2383](../assets/captures/opening-title-card.png) | The opening title appeared after the game moved past the loading artwork. |
-| Rendered 3D opening | [Frame 2421](../assets/captures/opening-cinematic.png) | The camera moved through several rendered shots, including the car and driver shown here. Visual artifacts remain. |
-
-The safety monitor ended the capture run after 397.6 seconds when macOS reported memory pressure.
-
-### Recent development tests
-
-| Area | Observed on M3 Max |
-| --- | --- |
-| Opening and input | The experimental runtime rendered the live 3D opening. A separate guarded run verified pause and resume input. Player movement and camera control remain unverified. |
-| Memory | With four expanded pools, the host presented at least 130 frames after the first visible 3D frame. Neither earlier game assertion recurred before the host memory guard ended the test. |
-| Shader translation | The runtime translated two previously unsupported pixel shaders, created their D3DMetal pipelines, and used both during the live run. |
-
-In the November 25, 2026 native-window shader test, the host presented at least 270 frames after the first frame with 3D draws. The trial reached its 20-minute time limit without repeating either earlier game assertion.
-
-| Capture | Observed on Mac |
-| --- | --- |
-| [Pause menu, frame 2929](../assets/captures/development-pause-menu.png) | The pause menu opened over the cinematic during a separate native-window test. The opening resumed after closing it. |
-| [Skyline, frame 2982](../assets/captures/development-skyline.png) | The skyline was partially rendered. Both repaired pixel shaders had already been used in this run. |
-
-The opening showed severe rendering artifacts and performance below 1 FPS. Gameplay remains unavailable.
-
-## Prologue rendering breakthroughs
-
-On November 26, 2026, experimental runtimes on an Apple M3 Max with CrossOver and D3DMetal captured these scenes in the final game image.
-
-| Test | Verified result | Remaining limit |
-| --- | --- | --- |
-| Series S Prologue with desktop AMD FSR | The title read the 250,880-byte Prologue save data. AMD FSR 3.1.6 upscaled the game from 1280 × 720 to 1920 × 1080. Frame 3129 showed a fenced yard and a guard tower. | Lighting was heavily overexposed. The memory guard ended the run at 179 seconds. |
-| Series S Prologue with 1080p compositing | A separate run read the same save and reproduced the yard in frame 3205, with people visible near the watchtower. The runtime blended the display layers into a 1080p output. | The memory guard ended the run at 162 seconds, before a controlled camera test. |
-| Local Cool Fox Series S opening | Frame 2767 showed a lit character close-up after illustrated loading artwork. | The run hit a read fault at world entry before input could be verified. |
-
-These tests establish visible 3D output. Sustained rendering, walking, and camera control in a visible scene remain unverified. The public XCL build's measured milestone remains world loading.
 
 ## Mullion fallback
 
