@@ -38,6 +38,33 @@
 
 [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
 
+## Lit world on an 18 GB M3 Pro with the checkpoint runtime
+
+<sub>November 26, 2026 · MacBook Pro, Apple M3 Pro, 18 GB · CrossOver Wine + D3DMetal · 1280×720 output</sub>
+
+The world's lighting, shadow and AO passes are compute shaders written for the console's 64-lane waves. On the Mac's 32-lane GPU the translator refused them, so their targets stayed at their clear and every lit surface came out black. The [November 26 checkpoint](runtime-preview/BUILD.md#november-26-source-checkpoint) now translates the wave reductions, first-lane reads and cross-half lane reads (`VICTORY_WAVE64_REDUCE=1`). The distinct compute shaders dropped in world frames fell from 50 to 28, and the same scenes now render shaded.
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <a href="assets/captures/m3pro-before-wave64-black-geometry.png"><img src="assets/captures/m3pro-before-wave64-black-geometry.png" width="260" alt="Before: the opening's skyline with the character and buildings as near-black silhouettes"></a>
+    </td>
+    <td width="33%" align="center">
+      <a href="assets/captures/m3pro-lit-car-wave64.png"><img src="assets/captures/m3pro-lit-car-wave64.png" width="260" alt="After: a red car at night with reflections on the paint and a lit street lamp"></a>
+    </td>
+    <td width="33%" align="center">
+      <a href="assets/captures/m3pro-lit-street-wave64.png"><img src="assets/captures/m3pro-lit-street-wave64.png" width="260" alt="After: third-person view of the character on a night street beside the car, lamp light on a building"></a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Before</strong><br>Lighting passes refused: black geometry.</td>
+    <td align="center"><strong>After</strong><br>Shaded car, paint reflections, street lamp.</td>
+    <td align="center"><strong>After</strong><br>Third-person street view, 400 s into the run.</td>
+  </tr>
+</table>
+
+These are still single frames, not gameplay: on 18 GB the title's footprint reaches about 14 GB and the Mac swaps 7 to 9 GB, so world frames take 2 to 30 s, mostly copying title memory and waiting on the GPU while it pages. The run harness, measurements and an always-on-top run monitor (`tools/scarlett-hud.sh`) are in [docs/runbook.md](docs/runbook.md).
+
 ## Earlier captures
 
 These images are from tests that preceded the captures above. They are ordered from newer native-window tests down to the earliest XCL setup screens.
