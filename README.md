@@ -63,7 +63,7 @@ The world's lighting, shadow and AO passes are compute shaders written for the c
   </tr>
 </table>
 
-These are still single frames, not gameplay: on 18 GB the title's footprint reaches about 14 GB and the Mac swaps 7 to 9 GB, so world frames take 2 to 30 s, mostly copying title memory and waiting on the GPU while it pages. The run harness, measurements and an always-on-top run monitor (`tools/scarlett-hud.sh`) are in [docs/runbook.md](docs/runbook.md).
+These are still single frames, not gameplay: on 18 GB the title's footprint reaches about 14 GB and the Mac swaps 7 to 9 GB, so world frames take 2 to 30 s, mostly copying title memory and waiting on the GPU while it pages. The run harnessand measurements are in [docs/runbook.md](docs/runbook.md).
 
 ## Earlier captures
 

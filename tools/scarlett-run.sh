@@ -96,7 +96,7 @@ marker=$root/.build/confirm.txt
 : > "$marker"
 
 export WINEPREFIX=$prefix
-export WINEDLLOVERRIDES="mscoree,mshtml=;d3d12,d3d12core,dxgi=b"
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree,mshtml=;d3d12,d3d12core,dxgi=b}"
 export WINEDEBUG=${WINEDEBUG:--all}
 export ROSETTA_ADVERTISE_AVX=1
 # The offline picker's confirmation, written to this file (see

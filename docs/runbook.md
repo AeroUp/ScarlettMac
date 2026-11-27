@@ -61,11 +61,6 @@ VICTORY_SKIP_SUPPORT_ALERT=1 tools/world-run.sh \
   --tag NAME --seconds 420 --at 240,300,360,400 --wait 3600
 ```
 
-`tools/scarlett-hud.sh` opens an always-on-top window that follows the newest
-run every 0.1 s: run and loading progress, fps, frame time and interval, copy
-and GPU cost, the lock and queue, CPU, RAM, swap, GPU use and the title's real
-footprint (`--cli` shows the same in a terminal).
-
 ## Judging a run
 
 ```sh
