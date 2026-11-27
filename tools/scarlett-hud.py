@@ -101,7 +101,8 @@ class Follower:
         self.frame = self.crash = self.first_world = None
 
     def newest(self):
-        logs = glob.glob(os.path.join(RUNS, "*.log"))
+        logs = [p for p in glob.glob(os.path.join(RUNS, "*.log"))
+                if re.match(r"\d{8}-\d{6}", os.path.basename(p))]
         return max(logs, key=os.path.getmtime) if logs else None
 
     def poll(self):
@@ -200,6 +201,7 @@ def system():
             vm.get("Pages occupied by compressor", 0)) * page
     swap = re.search(r"used = ([\d.]+)M", sh(["sysctl", "-n", "vm.swapusage"]))
     total_cpu, title_cpu, title_rss, wine_cpu = 0.0, 0.0, 0, 0.0
+    console, build_dir = None, None
     for line in sh(["ps", "-axo", "%cpu=,rss=,command="]).splitlines():
         parts = line.split(None, 2)
         if len(parts) < 3:
@@ -209,6 +211,10 @@ def system():
         if "victory.exe" in cmd and "--execute" in cmd:
             title_cpu += cpu
             title_rss += rss * 1024
+            console = "Series S" if "--console series-s" in cmd else "Series X"
+            bm = re.search(r"/\.build/([^/]+)/", cmd)
+            if bm:
+                build_dir = bm.group(1)
         elif "wineserver" in cmd:
             wine_cpu += cpu
     gpu = re.search(r'"Device Utilization %"=(\d+)', sh(["ioreg", "-r", "-d", "1", "-c", "IOAccelerator"]))
@@ -217,7 +223,8 @@ def system():
                 ram_used=used, ram_total=memsize, title_rss=title_rss,
                 swap_mb=float(swap.group(1)) if swap else 0.0,
                 gpu=int(gpu.group(1)) if gpu else None,
-                gpu_mem=int(gpu_mem.group(1)) if gpu_mem else None)
+                gpu_mem=int(gpu_mem.group(1)) if gpu_mem else None,
+                console=console, build_dir=build_dir)
 
 
 FOOT = {"total": None, "gpu": None, "title": None, "heap": None}
@@ -251,9 +258,19 @@ def render():
     now = time.time()
     out = []
     line = "─" * WIDTH
-    out.append(f" SCARLETTMAC HUD{time.strftime('%H:%M:%S') + f'.{int(now * 10) % 10}':>{WIDTH - 16}}")
-    out.append(line)
     r = run_state()
+    m = slow_state()["system"]
+    console = m.get("console")
+    if not console and r:
+        t = r["tag"].lower()
+        console = "Series S" if ("seriess" in t or "series-s" in t) else "Series X"
+    badge = f" [{console}]" if console else ""
+    if m.get("build_dir"):
+        badge += f" {m['build_dir']}"
+    hdr = f" SCARLETTMAC HUD{badge}"
+    clock = time.strftime('%H:%M:%S') + f'.{int(now * 10) % 10}'
+    out.append(f"{hdr:<{WIDTH - len(clock)}}{clock}")
+    out.append(line)
     if r is None:
         out.append(" no runs yet")
     else:
