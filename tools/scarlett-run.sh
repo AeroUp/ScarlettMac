@@ -112,7 +112,12 @@ guest="Z:${game/#\//\\}"
 guest=${guest//\//\\}
 
 cd "$runtime"
-"$wine" "$exe" run --execute "$guest" > "$log" 2>&1 &
+# SCARLETT_CONSOLE=series-s runs the title as an Xbox Series S: 7.8 GB of
+# title memory instead of 13.5 GB, and the title's Series S assets and
+# render sizes. On a Mac with 16-18 GB that is the difference that matters.
+console_args=()
+[[ -n ${SCARLETT_CONSOLE:-} ]] && console_args=(--console "$SCARLETT_CONSOLE")
+"$wine" "$exe" run "${console_args[@]}" --execute "$guest" > "$log" 2>&1 &
 wine_pid=$!
 print "running: $log (title pid $wine_pid, ${seconds}s)"
 
