@@ -63,12 +63,37 @@ pub fn read_kept(file: &std::path::Path) -> Option<Vec<u8>> {
 /// [`victory_shader::emit::translate_with`] through the on-disk cache (`shader_cache::native_shader`):
 /// `o` is part of the key.
 fn translate_cached(container: &[u8], o: Options) -> Result<HostShader, String> {
+    if let Some(why) = refused_by_switch(container) {
+        return Err(why);
+    }
     #[cfg(any(windows, target_os = "macos"))]
     return crate::shader_cache::native_shader(container, &format!("{o:?}"), |c| {
         victory_shader::emit::translate_with(c, o).map_err(|e| e.to_string())
     });
     #[cfg(not(any(windows, target_os = "macos")))]
     return victory_shader::emit::translate_with(container, o).map_err(|e| e.to_string());
+}
+
+/// `VICTORY_REFUSE_SHADERS=<hash>[,<hash>...]` (diagnostic, off by default): the containers of
+/// those short hashes (the log's `first bind ... hash=`) are refused as if they did not translate,
+/// so their work is dropped, to bisect which translation a symptom follows. Checked before the
+/// disk cache, which never stores these refusals.
+fn refused_by_switch(container: &[u8]) -> Option<String> {
+    static HASHES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let hashes = HASHES.get_or_init(|| refused_hashes(&std::env::var("VICTORY_REFUSE_SHADERS").unwrap_or_default()));
+    refused_among(hashes, container)
+}
+
+fn refused_hashes(value: &str) -> Vec<String> {
+    value.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect()
+}
+
+fn refused_among(hashes: &[String], container: &[u8]) -> Option<String> {
+    if hashes.is_empty() {
+        return None;
+    }
+    let hash = &blake3::hash(container).to_hex()[..16];
+    hashes.iter().any(|h| h == hash).then(|| format!("refused by VICTORY_REFUSE_SHADERS ({hash})"))
 }
 
 /// A compute shader's container translated for dispatches of thread counts
@@ -424,5 +449,23 @@ impl<B: PresentBackend> Title<B> {
     #[cfg(target_os = "macos")]
     pub(crate) fn compile_failed(&mut self, name: &str, error: &str) {
         super::glue::compile_failed(name, error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `VICTORY_REFUSE_SHADERS` names containers by the short hash the log prints (any case, comma
+    /// separated): one it names is refused, the reason naming the switch and the hash; others are
+    /// not, and an empty list refuses nothing.
+    #[test]
+    fn the_refuse_switch_refuses_the_containers_it_names() {
+        let (named, other) = (b"one container".as_slice(), b"another container".as_slice());
+        let hash = blake3::hash(named).to_hex()[..16].to_owned();
+        let list = super::refused_hashes(&format!(" 0123456789abcdef, {} ,,", hash.to_ascii_uppercase()));
+        assert_eq!(list.len(), 2);
+        let why = super::refused_among(&list, named).expect("refused");
+        assert!(why.contains("VICTORY_REFUSE_SHADERS") && why.contains(&hash), "{why}");
+        assert_eq!(super::refused_among(&list, other), None);
+        assert_eq!(super::refused_among(&super::refused_hashes(""), named), None);
     }
 }
