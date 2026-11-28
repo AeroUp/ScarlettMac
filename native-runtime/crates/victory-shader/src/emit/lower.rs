@@ -335,6 +335,11 @@ struct Lower<'a> {
     /// incoming values are still to fill (block, phi index, lane).
     spill_phis: Map<(Value, u32), V>,
     pending_spills: Vec<(V, usize, usize, u32)>,
+    /// What each `v_writelane_b32` of a constant lane put in that lane, by the VGPR value it
+    /// wrote: the scalar as made there, or why the host has no value for it. A VGPR whose
+    /// spill lanes include one with no value has none as a whole, but its other lanes do
+    /// ([`Lower::spill_slot`]).
+    lane_writes: Map<Value, Result<V, Why>>,
     /// Phis that code reads. Left a std set: [`Lower::live_edges`] starts
     /// its walk in this set's iteration order, and few phis are read.
     read_phis: HashSet<Value>,
@@ -1206,6 +1211,7 @@ impl<'a> Lower<'a> {
             data_phis: Vec::new(),
             spill_phis: Map::default(),
             pending_spills: Vec::new(),
+            lane_writes: Map::default(),
             read_phis: HashSet::new(),
             params: x.res.params.iter().map(|&(v, p, d)| (v, (p, d))).collect(),
             user_data: None,
@@ -2570,7 +2576,11 @@ impl<'a> Lower<'a> {
 
     /// What lane `lane` of VGPR value `v` holds when every path to it fills that lane with
     /// `v_writelane_b32` of an SGPR or constant (an SGPR spill): the value written, or a phi
-    /// of them at a VGPR join. With `make` unset only checks (`seen`: joins on the way).
+    /// of them at a VGPR join. The VGPR's other lanes do not matter: one may hold what the
+    /// host has no value for (a descriptor's address), and only a read of that lane is
+    /// refused, for that value's own reason ([`Lower::lane_writes`]). A join's edge where the
+    /// VGPR is not written yet brings zero. With `make` unset only checks (`seen`: joins on the
+    /// way).
     fn spill_slot(
         &mut self,
         v: Value,
@@ -2600,7 +2610,23 @@ impl<'a> Lower<'a> {
             self.pending_spills.push((x, b, i, lane));
             return Ok(x);
         }
-        let inst = self.def_inst(v).ok_or(NOT)?;
+        let Some(inst) = self.def_inst(v) else {
+            // A join's edge where nothing has written the VGPR yet (a loop's first entry, before
+            // the spill is made): it reads as zero there ([`Lower::inputs`]), and so does each
+            // of its lanes. Guess (docs/native-host.md, "Each spill lane its own value"): the
+            // console's lane holds what an earlier wave left, and the program reads it only on
+            // paths that made the spill.
+            let unset = !seen.is_empty()
+                && !self.x.io.inputs.iter().any(|&(x, _)| x == v)
+                && p.inputs
+                    .iter()
+                    .any(|&(r, x)| x == v && matches!(r, Reg::V(_)));
+            return match self.vals.get(&v) {
+                Some(&Val::I32(x)) if unset => Ok(x),
+                None if unset => Ok(self.s.m.i32(0)),
+                _ => Err(NOT),
+            };
+        };
         let Fields::Valu(w) = &inst.fields else { return Err(NOT) };
         let (Some(Operand::Vector { reg, .. }), [value, at]) = (w.dst, &w.src[..]) else {
             return Err(NOT);
@@ -2614,6 +2640,21 @@ impl<'a> Lower<'a> {
         let c = match *value {
             Operand::Scalar { code: NULL, .. } => 0,
             Operand::Scalar { code, .. } => {
+                if let Some(w) = inst.write(Reg::V(reg)) {
+                    // The scalar as the write made it (a lane mask's number with console
+                    // lanes), or why the host has none: the lane's own reason, not the VGPR's.
+                    if let Some(&r) = self.lane_writes.get(&w) {
+                        return r;
+                    }
+                    // A write not made yet (on a back edge): checked when the phis are filled.
+                    if !make
+                        && let Some(&b) = self.def_block.get(&w)
+                        && b != self.cur_ir
+                        && self.tail[b].is_none()
+                    {
+                        return Ok(self.s.m.i32(0));
+                    }
+                }
                 let x = inst.read(Reg::S(code)).ok_or(NOT)?;
                 // Values made by now (on a back edge, by the time phis are filled).
                 return match self.vals.get(&x) {
@@ -10524,10 +10565,20 @@ impl<'a> Lower<'a> {
             }
             "v_writelane_b32" => {
                 // The lane given takes the scalar; the others keep their value.
-                let (a, lane) = (s(self, 0)?, s(self, 1)?);
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a lane write");
                 };
+                // A spill's lane keeps its own value, whatever the VGPR's other lanes hold.
+                let a = s(self, 0);
+                if v.src
+                    .get(1)
+                    .and_then(|&l| crate::resource::lane_of(l))
+                    .is_some()
+                    && let Some(w) = inst.write(Reg::V(reg))
+                {
+                    self.lane_writes.insert(w, a);
+                }
+                let (a, lane) = (a?, s(self, 1)?);
                 let old = match inst.read(Reg::V(reg)) {
                     Some(o) => self.i32_of(o)?,
                     None => self.s.m.i32(0),
@@ -15961,7 +16012,7 @@ impl<'a> Lower<'a> {
                 let qb = self.edges.get(&(q, b)).copied().unwrap_or(qb);
                 let a = p.blocks[b].phis[i].args[n];
                 let y = self
-                    .spill_slot(a, lane, &mut Vec::new(), true)
+                    .spill_slot(a, lane, &mut vec![p.blocks[b].phis[i].value], true)
                     .map_err(|w| unsupported(p.blocks[b].offset, w))?;
                 incoming.push((y, qb));
             }

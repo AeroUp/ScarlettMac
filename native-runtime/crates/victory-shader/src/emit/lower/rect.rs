@@ -95,6 +95,7 @@ impl<'a> Lower<'a> {
         self.data_phis.clear();
         self.spill_phis.clear();
         self.pending_spills.clear();
+        self.lane_writes.clear();
         self.read_phis.clear();
         self.handles.clear();
         self.join_handles.clear();

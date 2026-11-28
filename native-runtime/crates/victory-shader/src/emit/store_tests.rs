@@ -81,3 +81,15 @@ fn packed_unsigned_16_bit_conversions_translate() {
         ],
     );
 }
+
+/// 113-120 KB compute programs that spill an image descriptor's base address to a VGPR lane
+/// beside an EXEC they read back from lane 0 of the same VGPR, through a join with an edge
+/// where the VGPR is not written yet: refused for the base address before each lane kept its
+/// own value (`lower::Lower::spill_slot`, `lane_writes`).
+#[test]
+fn a_descriptor_address_spilled_beside_a_restored_exec_translates() {
+    assert_translates(
+        "an image's base address (dword 0) spilled to a VGPR lane",
+        &["bf865cf731f6c8ff", "0318b6d2a9d5c44a", "ff6136ac963ef248"],
+    );
+}

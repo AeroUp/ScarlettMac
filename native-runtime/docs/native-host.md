@@ -2685,6 +2685,26 @@ at a lane mask, 51 at an image's base address, 16 at a buffer's dword 1 and one 
 joined with data. Test:
 `resource::tests::spilled_descriptor_dwords_whose_copies_agree_reach_their_load`.
 
+**Each spill lane its own value (28 November).** Past the tracer, the lowering still refused
+those programs for an image's base address: the spill of dword 0 to one lane left the VGPR with no
+value as a whole, and a read of another lane (lane 0, an EXEC the program restores and branches on
+with `s_cbranch_execz`) fell back to reading the whole VGPR, because `Lower::spill_slot` could not
+follow lane 0 through the VGPR's joins: the lane holds a lane mask (no plain value), and one edge of
+a join is the VGPR before anything wrote it. Each `v_writelane_b32` of a constant lane now keeps what
+it put in its lane (`Lower::lane_writes`: the scalar as made there, with console lanes a mask's
+number, or the reason the host has none), and `spill_slot` reads that. Guess: on a join's edge where
+nothing has written the VGPR yet (a loop's first entry, before the spill is made), the lane is zero,
+as the lowering already reads a VGPR nothing wrote (`Lower::inputs`). On the console it holds what
+an earlier wave left; the compiler reads a spill lane only on paths that wrote it, so no program
+should depend on the value. Only a join's edge gets this: a `v_readlane` straight of an unwritten
+VGPR, or of a lane another instruction than `v_writelane_b32` wrote on some edge, is unchanged
+(refused, or a cross-lane read of the whole VGPR). A read of the spilled descriptor's lane is
+refused for the descriptor, as before. Measured on the kept store (31,575 containers): 94 more
+translate, 0 regressions, 0 output changes; the counts by reason are in docs/metal-backend.md
+("The largest class is not a descriptor"). Tests:
+`gfx_refusal_tests::a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read` and
+`a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join`.
+
 ## The device's own memory ceiling, logged at native host startup (issue #8)
 
 16 GB Macs still run the title out of GPU memory past the menus (`kIOGPUCommandBufferCallbackErrorOutOfMemory`),

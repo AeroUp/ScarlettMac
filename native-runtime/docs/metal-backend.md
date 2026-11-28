@@ -677,12 +677,35 @@ and raises fence values.
   all are 113-120 KB compute programs, and the dword 0 they "read" is only *spilled*: for
   `bf865cf731f6c8ff` the load at 0x8150 is read as data, its dword 0 (s12) is written to VGPR lane 12
   (`v_writelane_b32 v141, s12, 12`), and the refusal surfaces at an `s_cbranch_execz` whose EXEC comes
-  from a `v_readlane` of lane 0. Serving it a value moves 98 of them to a buffer's dword 1 (fixed
-  above) and 88 then to the lane-mask family: the per-lane spill phi has an edge with no write ("a VGPR
-  lane no SGPR spill fills"). The fix is the spill model, not the descriptor: a `v_writelane` whose
-  scalar the host cannot make poisons its whole VGPR value, so a `v_readlane` of a *different* lane,
-  whose value is known, refuses too. Per-lane values through the register's phis would let the
-  descriptor dword be spilt and never read.
+  from a `v_readlane` of lane 0. A `v_writelane` whose scalar the host cannot make poisoned its whole
+  VGPR value, and the read of lane 0 fell back to reading that value: lane 0 holds an EXEC (a lane
+  mask, no plain value in the VGPR), its VGPR goes through joins where different masks were spilled,
+  and one edge of a join is the VGPR before anything wrote it (a loop's first entry). The fix is the
+  spill model, not the descriptor (28 November): each `v_writelane_b32` of a constant lane keeps what
+  it put in its lane (`Lower::lane_writes`: the scalar as made there, a mask's number with console
+  lanes, or why the host has none), `Lower::spill_slot` takes a lane's value from that, a phi of
+  them at joins, and a join's edge where the VGPR is not written yet gives zero, as a VGPR nothing
+  wrote reads (guess, docs/native-host.md). Reading the spilled descriptor's own lane is still
+  refused for the base address. On the kept store of 28 November (31,575 containers) 94 more
+  translate and none regress or change output:
+
+  | reason | before | after |
+  |---|---|---|
+  | an image's base address (dword 0) | 361 | 228 |
+  | a lane mask holding lanes elsewhere read as data: not written by a scalar ALU instruction | 144 | 121 |
+  | a lane mask read as data | 358 | 355 |
+  | a lane-mask join of an untracked mask: a value the translation could not make | 101 | 162 |
+  | a register joining a lane mask and data, read as data | 42 | 45 |
+  | a descriptor read only as data | 68 | 69 |
+
+  Of the 133 that left the base-address reason, 73 translate and 59 moved to the lane-mask join
+  "a value the translation could not make": an SGPR that holds a mask on one edge and descriptor
+  data on another (27 of them a descriptor read only as data, 13 an image dimension, 6 the base
+  address again), not a spill lane. That join, not the spill, is the next refusal of this family;
+  the 70 "data, on the host's lanes" joins are unchanged. Tests:
+  `gfx_refusal_tests::a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read`,
+  `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join` (both refused before), and
+  `store_tests::a_descriptor_address_spilled_beside_a_restored_exec_translates`.
 - **Title memory at computed addresses: the pool-offset contract** (`native/addr.rs`, compute shaders). A
   shader that reads or writes through a pointer it computes (`global_*`, `s_load` from a loaded address,
   atomics, BVH nodes) finds the memory through the translator's page table (`emit` "Title memory"): per

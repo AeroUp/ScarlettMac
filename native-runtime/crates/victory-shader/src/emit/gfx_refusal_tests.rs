@@ -933,6 +933,151 @@ fn an_images_last_descriptor_dwords_read_as_data_are_its_views() {
     );
 }
 
+/// An image descriptor's base address (dword 0, which the host has no value for) spilled to
+/// lane 12 of v6, beside a scalar the host has in lane 0: the shape of the 113-120 KB compute
+/// programs that were the largest refusal class. `body` runs after the image load and
+/// before a store; s20 holds the scalar.
+fn spilled_beside_a_descriptor(body: &[u32]) -> Vec<u8> {
+    use crate::native::tests::{fspx, fspx_resource};
+    let mut code = vec![
+        0xBE85_0380, // s_mov_b32 s5, 0
+        0xF408_0202,
+        0xFA00_0000, // s_load_dwordx4 s[8:11], s[4:5], 0
+        0xF40C_0302,
+        0xFA00_0020, // s_load_dwordx8 s[12:19], s[4:5], 0x20
+        0xBE94_0380, // s_mov_b32 s20, 0
+        0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+        0xF000_1F08,
+        0x0003_0200, // image_load v[2:5], v[0:1], s[12:19] dmask:0xf dim:2D unorm
+    ];
+    code.extend_from_slice(body);
+    code.extend([
+        0xBF8C_3F70, // s_waitcnt vmcnt(0)
+        0xE070_0000,
+        0x8002_0200, // buffer_store_dword v2, off, s[8:11], 0
+        0xBF81_0000, // s_endpgm
+    ]);
+    let resources = [
+        fspx_resource(3, 3, 0, 0, 4, 0),
+        fspx_resource(0, 3, 8, 0, 4, 0),
+    ];
+    let part = fspx(&bytes_of(&code), 5 << 1, [32, 1, 1], true, &resources);
+    crate::dxbc::build(&[(FourCC::ACCC, &part)])
+}
+
+const SPILL_DWORD_0: [u32; 2] = [0xD761_0006, 0x0001_180C]; // v_writelane_b32 v6, s12, 12
+const SPILL_S20: [u32; 2] = [0xD761_0006, 0x0001_0014]; // v_writelane_b32 v6, s20, 0
+
+/// `v_readlane_b32 s21, v6, <lane>`.
+fn read_lane(lane: u32) -> [u32; 2] {
+    // An inline constant lane: 128 + lane.
+    [0xD760_0015, 0x0001_0106 | (128 + lane) << 9]
+}
+
+fn refused_for_the_base_address(shader: &[u8], options: Options) {
+    let err = translate_with(shader, options).err();
+    assert!(
+        matches!(&err, Some(ShaderError::Unsupported { what, .. })
+            if what.contains("an image's base address (dword 0)")),
+        "{err:?}"
+    );
+}
+
+/// A loop spills an image descriptor's base address to lane 12 of v6 and its counter to lane
+/// 0, and from its second pass on reads lane 0 back and branches on it. The VGPR's join at the
+/// loop's head has an edge where nothing wrote it, and the spill of the address left it with
+/// no host value as a whole: the read refused for the address ("an image's base address
+/// (dword 0)"), 99 of a world run's 225 dropped pipelines. Lane 0 is the counter on one edge
+/// and zero on the other, so the program translates; a read of lane 12 is still refused for
+/// the address.
+#[test]
+fn a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read() {
+    // `exec`: lane 0 holds EXEC, restored from it and branched on with `s_cbranch_execz`
+    // (as the title's programs do), instead of the counter compared to 0.
+    let program = |lane: u32, exec: bool| {
+        let mut body = vec![
+            0xBF06_8014, // 0: s_cmp_eq_u32 s20, 0 (the loop's head)
+            0xBF85_0004, // s_cbranch_scc1 4 (to the spills)
+        ];
+        body.extend(read_lane(lane));
+        body.extend(if exec {
+            [
+                0xBEFE_0315, // s_mov_b32 exec_lo, s21
+                0xBF88_0007, // s_cbranch_execz 7 (out of the loop)
+            ]
+        } else {
+            [
+                0xBF06_8015, // s_cmp_eq_u32 s21, 0
+                0xBF85_0007, // s_cbranch_scc1 7 (out of the loop)
+            ]
+        });
+        body.extend(SPILL_DWORD_0);
+        // v_writelane_b32 v6, exec_lo, 0
+        body.extend(if exec {
+            [0xD761_0006, 0x0001_007E]
+        } else {
+            SPILL_S20
+        });
+        body.extend([
+            0x8094_8114, // s_add_u32 s20, s20, 1
+            0xBF0A_8314, // s_cmp_lt_u32 s20, 3
+            0xBF85_FFF3, // s_cbranch_scc1 -13 (to the head)
+        ]);
+        spilled_beside_a_descriptor(&body)
+    };
+    let host = Options {
+        wave32_host: true,
+        zero_copy_memory: true,
+        ..Default::default()
+    };
+    for options in [Options::default(), host] {
+        for exec in [false, true] {
+            let shader = translate_with(&program(0, exec), options);
+            assert!(shader.is_ok(), "{exec}: {:?}", shader.err());
+            refused_for_the_base_address(&program(12, exec), options);
+        }
+    }
+}
+
+/// The spills on one arm of a branch only, and lane 0 read after the join: the arm that skips
+/// them brings zero for the lane, as a VGPR nothing wrote reads (guess: the console's lane
+/// holds what an earlier wave left, which no program depends on), and the program translates.
+/// Where the other arm writes the whole VGPR instead, lane 0 there is not a spill the host
+/// follows, and the read stays refused for the address.
+#[test]
+fn a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join() {
+    let program = |lane: u32, written: bool| {
+        let mut body = vec![];
+        if written {
+            body.push(0x7E0C_0300); // v_mov_b32 v6, v0
+        }
+        body.extend([
+            0x7E2C_0500, // v_readfirstlane_b32 s22, v0
+            0xBF06_8016, // s_cmp_eq_u32 s22, 0
+            0xBF85_0004, // s_cbranch_scc1 4 (past the spills)
+        ]);
+        body.extend(SPILL_DWORD_0);
+        body.extend(SPILL_S20);
+        body.extend(read_lane(lane));
+        body.extend([
+            0xBF06_8015, // s_cmp_eq_u32 s21, 0
+            0xBF85_0003, // s_cbranch_scc1 3 (past the store)
+        ]);
+        spilled_beside_a_descriptor(&body)
+    };
+    let host = Options {
+        wave32_host: true,
+        zero_copy_memory: true,
+        ..Default::default()
+    };
+    for options in [Options::default(), host] {
+        let shader = translate_with(&program(0, false), options);
+        assert!(shader.is_ok(), "{:?}", shader.err());
+        refused_for_the_base_address(&program(12, false), options);
+        refused_for_the_base_address(&program(0, true), options);
+    }
+}
+
 /// A descriptor read only as data takes its dwords from the view addresses (`t1`), which hold a
 /// buffer's address, stride and record count and an image's size fields, and give every other
 /// field as 0: a program that can see a bit of those is refused naming the field, and one that
