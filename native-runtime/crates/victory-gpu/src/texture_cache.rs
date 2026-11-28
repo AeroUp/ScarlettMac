@@ -553,7 +553,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path(), 0).unwrap();
         let l = layout();
-        let hash = blake3::hash(b"tiled bytes");
+        let hash = ContentHash::of(b"tiled bytes");
         // Both levels of the layout, so a hit finds every level it needs.
         let big = |mip: usize, byte: u8| Level {
             mip,

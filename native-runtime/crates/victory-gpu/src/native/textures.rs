@@ -3799,8 +3799,9 @@ impl<B: PresentBackend> Title<B> {
         }
         // SAFETY: `resolve` gave `size` mapped, writable bytes of the pool; the buffer is kept.
         unsafe { std::ptr::copy_nonoverlapping(tiled.as_ptr(), at.cast_mut(), tiled.len()) };
+        let hash = ContentHash::of(&tiled);
         if let Some(t) = self.textures.get_mut(&key) {
-            t.last = Some(ContentHash::of(&tiled));
+            t.last = Some(hash);
             // The title read or wrote those pages: they are its own now, and are not given back
             // again (a copy it reads back every frame must not fault every frame).
             t.streamed = false;
