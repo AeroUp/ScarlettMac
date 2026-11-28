@@ -1078,6 +1078,32 @@ fn a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join() {
     }
 }
 
+/// The spills on the arm of an EXEC branch (the lanes below 20) only, and lane 0 restored to EXEC
+/// after the join: the console's wave runs that arm, so lanes that skip it read the EXEC it
+/// spilled, where a lane's own path brings lane 0 unwritten (zero: those lanes then stored
+/// nothing on Metal). Lane 0 is not followed through a join that lanes enter by their own bits
+/// with different spills, and the read falls back to the whole VGPR: refused for the address.
+#[test]
+fn a_descriptor_dword_spilled_on_an_arm_some_lanes_skip_is_not_read_after_the_join() {
+    let mut body = vec![
+        0x7D88_0094, // v_cmp_gt_u32 vcc_lo, 20, v0
+        0xBE99_3C6A, // s_and_saveexec_b32 s25, vcc_lo
+        0xBF88_0004, // s_cbranch_execz 4 (past the spills)
+    ];
+    body.extend(SPILL_DWORD_0);
+    body.extend([0xD761_0006, 0x0001_0019]); // v_writelane_b32 v6, s25, 0
+    body.extend(read_lane(0));
+    body.push(0x887E_157E); // s_or_b32 exec_lo, exec_lo, s21
+    let host = Options {
+        wave32_host: true,
+        zero_copy_memory: true,
+        ..Default::default()
+    };
+    for options in [Options::default(), host] {
+        refused_for_the_base_address(&spilled_beside_a_descriptor(&body), options);
+    }
+}
+
 /// A descriptor read only as data takes its dwords from the view addresses (`t1`), which hold a
 /// buffer's address, stride and record count and an image's size fields, and give every other
 /// field as 0: a program that can see a bit of those is refused naming the field, and one that

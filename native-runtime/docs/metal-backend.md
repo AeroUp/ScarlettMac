@@ -679,49 +679,39 @@ and raises fence values.
   (`v_writelane_b32 v141, s12, 12`), and the refusal surfaces at an `s_cbranch_execz` whose EXEC comes
   from a `v_readlane` of lane 0. A `v_writelane` whose scalar the host cannot make poisoned its whole
   VGPR value, and the read of lane 0 fell back to reading that value: lane 0 holds an EXEC (a lane
-  mask, no plain value in the VGPR), its VGPR goes through joins where different masks were spilled,
-  and one edge of a join is the VGPR before anything wrote it (a loop's first entry). The fix is the
-  spill model, not the descriptor (28 November): each `v_writelane_b32` of a constant lane keeps what
-  it put in its lane (`Lower::lane_writes`: the scalar as made there, a mask's number with console
-  lanes, or why the host has none), `Lower::spill_slot` takes a lane's value from that, a phi of
-  them at joins, and a join's edge where the VGPR is not written yet gives zero, as a VGPR nothing
-  wrote reads (guess, docs/native-host.md). Reading the spilled descriptor's own lane is still
-  refused for the base address. On the kept store of 28 November (31,575 containers) 86 more
-  translate, and 61 change output:
+  mask), and its VGPR goes through joins where different masks were spilled, some with an edge where
+  nothing wrote the VGPR yet. Each `v_writelane_b32` of a constant lane now keeps what it put in its
+  lane (`Lower::lane_writes`), and `Lower::spill_slot` follows a lane through joins. A first version
+  took each lane's own path through every join (an unwritten edge as zero) and translated 86 more
+  programs, 29 of them bound in the world; a game run with them stalled a compute command buffer
+  (in flight > 6.8 s) about 90 s into the world. On Metal (`victory-gpu` `spill_lane_tests`), an
+  EXEC spilled inside an EXEC branch and restored after it left the lanes that skipped the branch
+  off (they stored nothing), where on GFX10 the wave runs the branch and every lane reads that EXEC;
+  so did a mask with bits of inactive lanes (`s_not_b32` of EXEC) spilled there. Most of the title's
+  29 have such joins (up to 8 each, often one with an unwritten edge). Now a join that lanes enter
+  through a branch on their own bits must bring one spill on every forward edge, unless every
+  spill in its web is a plain scalar on a written edge (what the lowering followed before, mesh
+  programs among them: unchanged) (`Lower::spill_join_agrees`). Shapes the Metal tests run
+  correctly: a counter spilled in a uniform loop bounding it, an EXEC restored at a loop's head
+  each pass, a break mask of a divergent loop, nested saved EXECs, a respill to another VGPR, a
+  wave64 pair over both halves.
 
-  | reason | before | after |
-  |---|---|---|
-  | an image's base address (dword 0) | 361 | 219 |
-  | a lane mask holding lanes elsewhere read as data: not written by a scalar ALU instruction | 144 | 128 |
-  | a lane mask read as data | 358 | 349 |
-  | a lane-mask join of an untracked mask: a value the translation could not make | 101 | 170 |
-  | a register joining a lane mask and data, read as data | 42 | 58 |
-  | a descriptor read only as data | 68 | 70 |
+  The first version also crashed the Metal Shader Converter (`SimplifyCFG`) on 7 programs: a
+  mask's number at a join (`Lower::mask_phi_number`) is cached as a phi before its edges, and a
+  failed join's empty phi stayed cached for later reads. Main has 6 programs whose output keeps such
+  a phi (4 crash the converter offline). Taking the failed phi out of the cache changed the output
+  of 61 programs main translates (fewer ballots, selects and ands live; 29 of them bound in the
+  world) with no proof they compute the same, so that is not done: `Lower::unfilled_phis` refuses a
+  function whose written phis lack an incoming value per edge ("a join whose incoming values were not
+  all made"), and the 61 keep main's output.
 
-  The first version of this change translated 94, and a game run crashed in the converter
-  (`SimplifyCFG`, `EXC_BAD_ACCESS`) on 7 of them: their functions had a phi with no incoming
-  value. `Lower::mask_phi_number` puts a join's phi in the mask-number cache (`ballots`) before
-  filling it, for a back edge that reads it; when an edge has no number it fails, and the phi
-  stayed in the cache, so a later read of the same mask got the empty phi. Main has the same
-  bug: 6 programs it translates have such a phi (4 of them crash the converter offline), and
-  54 more read the empty phi while being lowered (counted with a local diagnostic). A
-  failed join now leaves the cache, so later reads fail as the first did, and
-  `Lower::unfilled_phis` refuses any function whose written phis lack an incoming value per
-  edge ("a join whose incoming values were not all made"; no program of the store reaches it).
-  So the 6 are refused now ("a lane-mask join of an untracked mask: a value the translation
-  could not make"), the 61 whose output changed took the empty phi out of their lowering (all
-  pass a structural check of phis, dominance and written operands, and convert), and the 8
-  of the 94 left are refused for the join. Of the 142 that left the base-address reason, 70
-  translate and 58 moved to that join: an SGPR that holds a mask on one edge and descriptor
-  data on another (a descriptor read only as data, an image dimension, the base address
-  again), not a spill lane. That join, not the spill, is the next refusal of this family; the
-  70 "data, on the host's lanes" joins are unchanged. Tests:
+  Kept store, 29 November (31,597 containers), against main: 6 newly translated (each converts; one,
+  `1cb0acd50c525aa4`, bound in the world), the 6 with an empty phi refused, no output changed. Tests:
   `gfx_refusal_tests::a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read`,
-  `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join` (both refused before),
-  `bitcode::tests::a_written_phi_without_an_entry_per_edge_is_found`,
-  `store_tests::a_descriptor_address_spilled_beside_a_restored_exec_translates` and
-  `store_tests::a_mask_joins_number_that_failed_is_not_read_again` (translated with the empty
-  phi before).
+  `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join`,
+  `a_descriptor_dword_spilled_on_an_arm_some_lanes_skip_is_not_read_after_the_join`,
+  `bitcode::tests::a_written_phi_without_an_entry_per_edge_is_found`, `store_tests` (with
+  `VICTORY_SHADER_STORE`), `victory-gpu` `spill_lane_tests` (Metal).
 - **Title memory at computed addresses: the pool-offset contract** (`native/addr.rs`, compute shaders). A
   shader that reads or writes through a pointer it computes (`global_*`, `s_load` from a loaded address,
   atomics, BVH nodes) finds the memory through the translator's page table (`emit` "Title memory"): per

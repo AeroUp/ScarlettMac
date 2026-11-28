@@ -83,25 +83,29 @@ fn packed_unsigned_16_bit_conversions_translate() {
 }
 
 /// 113-120 KB compute programs that spill an image descriptor's base address to a VGPR lane
-/// beside an EXEC they read back from lane 0 of the same VGPR, through a join with an edge
-/// where the VGPR is not written yet: refused for the base address before each lane kept its
-/// own value (`lower::Lower::spill_slot`, `lane_writes`).
+/// beside an EXEC they read back from lane 0 of the same VGPR. Each lane's own value of a spill
+/// (`lower::Lower::spill_slot`, `lane_writes`) translated them, but their lane 0 reaches the
+/// read through joins that lanes skipping a branch enter with another spill, or none, than the
+/// branch made (`Lower::spill_join_agrees`): on the console those lanes read what the wave
+/// wrote in the branch. Refused again; an EXEC so restored stored nothing for such lanes on
+/// Metal (`victory-gpu` `spill_lane_tests`).
 #[test]
-fn a_descriptor_address_spilled_beside_a_restored_exec_translates() {
-    assert_translates(
-        "an image's base address (dword 0) spilled to a VGPR lane",
-        &["bf865cf731f6c8ff", "0318b6d2a9d5c44a", "ff6136ac963ef248"],
-    );
+fn a_descriptor_address_spilled_beside_an_exec_restored_after_a_skipped_branch_is_refused() {
+    for hash in ["bf865cf731f6c8ff", "0318b6d2a9d5c44a", "ff6136ac963ef248"] {
+        let Some(shader) = translate(hash) else {
+            return;
+        };
+        assert!(shader.is_err(), "{hash}: translated");
+    }
 }
 
 /// Programs whose lowering made a lane mask's number at a join as a phi, failed to fill it
-/// (an edge's mask or data has no number), and then found the empty phi through the cache on a
-/// later read: they translated into a function the Metal Shader Converter crashed on, in a run
-/// and offline. Now the later reads fail as the first did, so these are refused for their own
-/// reasons (none for "a join whose incoming values were not all made", the guard behind it).
-/// When those joins are lowered, this becomes a check that they translate.
+/// (an edge's mask or data has no number), and then read the empty phi through the cache: they
+/// translated into a function the Metal Shader Converter crashed on, in a run and offline. They
+/// are refused ("a join whose incoming values were not all made", `Lower::unfilled_phis`).
+/// Programs that read such a phi only into code that is not written keep their translation.
 #[test]
-fn a_mask_joins_number_that_failed_is_not_read_again() {
+fn a_mask_joins_number_left_unmade_is_refused() {
     for hash in [
         "4997b6b9c6de757e",
         "56ee7eb1a3f7f4d5",
@@ -115,9 +119,6 @@ fn a_mask_joins_number_that_failed_is_not_read_again() {
         let Some(shader) = translate(hash) else {
             return;
         };
-        match shader {
-            Ok(()) => panic!("{hash}: translated with a join's number left unmade"),
-            Err(e) => assert!(!e.contains("not all made"), "{hash}: {e}"),
-        }
+        assert!(shader.is_err(), "{hash}: translated with a join's number left unmade");
     }
 }

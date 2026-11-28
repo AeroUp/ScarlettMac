@@ -2580,8 +2580,8 @@ impl<'a> Lower<'a> {
     /// of them at a VGPR join. The VGPR's other lanes do not matter: one may hold what the
     /// host has no value for (a descriptor's address), and only a read of that lane is
     /// refused, for that value's own reason ([`Lower::lane_writes`]). A join's edge where the
-    /// VGPR is not written yet brings zero. With `make` unset only checks (`seen`: joins on the
-    /// way).
+    /// VGPR is not written yet brings zero, where lanes do not skip a branch into the join
+    /// ([`Lower::spill_join_agrees`]). With `make` unset only checks (`seen`: joins on the way).
     fn spill_slot(
         &mut self,
         v: Value,
@@ -2603,6 +2603,7 @@ impl<'a> Lower<'a> {
                 for &a in &p.blocks[b].phis[i].args {
                     self.spill_slot(a, lane, seen, false)?;
                 }
+                self.spill_join_agrees(b, i, lane)?;
                 return Ok(self.s.m.i32(0));
             }
             let at = self.block[b].ok_or(NOT)?;
@@ -2616,7 +2617,8 @@ impl<'a> Lower<'a> {
             // the spill is made): it reads as zero there ([`Lower::inputs`]), and so does each
             // of its lanes. Guess (docs/native-host.md, "Each spill lane its own value"): the
             // console's lane holds what an earlier wave left, and the program reads it only on
-            // paths that made the spill.
+            // paths that made the spill. A lane's own path is the wave's only at a loop's first
+            // entry or a uniform join; elsewhere `spill_join_agrees` refuses the edge.
             let unset = !seen.is_empty()
                 && !self.x.io.inputs.iter().any(|&(x, _)| x == v)
                 && p.inputs
@@ -2669,6 +2671,87 @@ impl<'a> Lower<'a> {
             _ => return Err(NOT),
         };
         Ok(self.s.m.i32(c))
+    }
+
+    /// Refuses a VGPR join where lanes arrive by different forward edges (a branch on their own
+    /// bits into it) and the edges bring lane `lane` different spills. The console's lane is one
+    /// register of the wave: the wave runs every path some lane takes, so after the join each lane
+    /// reads what the last path the wave ran wrote there, not its own path's (a lane that skipped
+    /// a branch reads the spill made inside it). A loop's back edge brings what the wave's last
+    /// pass wrote to the lanes still looping, as on the console, and is not compared.
+    fn spill_join_agrees(&self, b: usize, i: usize, lane: u32) -> Result<(), Why> {
+        let p = self.x.p;
+        let any = |_: Value| true;
+        let forward: Vec<(usize, Value)> = p.blocks[b]
+            .preds
+            .iter()
+            .zip(&p.blocks[b].phis[i].args)
+            .filter(|&(&q, _)| {
+                self.block[q].is_some()
+                    && p.blocks[q].offset < p.blocks[b].offset
+                    && !self.never_taken(q, b)
+            })
+            .map(|(&q, &a)| (q, a))
+            .collect();
+        if !forward.iter().any(|&(q, _)| !self.uniform_edge(q, &any)) {
+            return Ok(());
+        }
+        let first = self.spill_source(forward[0].1, lane);
+        if forward.iter().all(|&(_, a)| self.spill_source(a, lane) == first) && first.is_some() {
+            return Ok(());
+        }
+        // shortcut: spills of plain scalars only, every edge written (what the lowering followed
+        // before lanes kept their own values, in mesh programs among others) keep each lane's
+        // own path, as SGPRs do.
+        let mut seen = Vec::new();
+        if forward.iter().any(|&(_, a)| self.spill_web_beyond_scalars(a, lane, &mut seen)) {
+            return Err("a spill lane that lanes skipping a branch read after the join");
+        }
+        Ok(())
+    }
+
+    /// Whether lane `lane` of VGPR value `v`, through the VGPR's joins, comes from an edge where
+    /// nothing wrote it or from a spill of a value with no plain host value (a lane mask's number).
+    fn spill_web_beyond_scalars(&self, v: Value, lane: u32, seen: &mut Vec<Value>) -> bool {
+        match self.spill_source(v, lane) {
+            None => true,
+            Some((Some(x), 1)) => !matches!(self.vals.get(&x), Some(Val::I32(_))),
+            Some((Some(phi), u32::MAX)) => {
+                if seen.contains(&phi) {
+                    return false;
+                }
+                seen.push(phi);
+                let (b, i) = self.phi_at[&phi];
+                self.x.p.blocks[b].phis[i].args.iter().any(|&a| self.spill_web_beyond_scalars(a, lane, seen))
+            }
+            Some(_) => false,
+        }
+    }
+
+    /// What put lane `lane` of VGPR value `v` there: the SGPR value (or constant) a
+    /// `v_writelane_b32` of that lane wrote, or a VGPR join; `None` where nothing wrote it.
+    fn spill_source(&self, mut v: Value, lane: u32) -> Option<(Option<Value>, u32)> {
+        loop {
+            if self.phi_at.contains_key(&v) {
+                return Some((Some(v), u32::MAX));
+            }
+            let inst = self.def_inst(v)?;
+            let Fields::Valu(w) = &inst.fields else { return Some((Some(v), 0)) };
+            let (Some(Operand::Vector { reg, .. }), [value, at]) = (w.dst, &w.src[..]) else {
+                return Some((Some(v), 0));
+            };
+            if inst.name() != "v_writelane_b32" || crate::resource::lane_of(*at) != Some(lane) {
+                v = inst.read(Reg::V(reg))?;
+                continue;
+            }
+            return Some(match *value {
+                Operand::Scalar { code: NULL, .. } => (None, 0),
+                Operand::Scalar { code, .. } => (inst.read(Reg::S(code)), 1),
+                Operand::Const(c) => (None, crate::resource::inline(c).unwrap_or(u32::MAX)),
+                Operand::Literal(x) => (None, x),
+                _ => (Some(v), 2),
+            });
+        }
     }
 
     /// Refuses a function with a join whose incoming values are not one per edge into its
@@ -3521,13 +3604,7 @@ impl<'a> Lower<'a> {
                     return Err("a register joining a lane mask and data, read as data");
                 }
             }
-            let number = self.mask_phi_number(lo, b, i);
-            if number.is_err() {
-                // The join's phi went in first (for a back edge that reads it) and is not
-                // filled: a later read must not find it ([`Lower::unfilled_phis`]).
-                self.ballots.remove(&lo);
-            }
-            return number;
+            return self.mask_phi_number(lo, b, i);
         }
         let &b = self.def_block.get(&lo).ok_or(INPUT)?;
         let inst = p.blocks[b]
