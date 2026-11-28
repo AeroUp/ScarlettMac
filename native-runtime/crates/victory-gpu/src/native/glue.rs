@@ -2188,11 +2188,12 @@ pub(crate) fn log_draw_counts(frame: u64) {
     let (mesh, mesh_indirect, _, copies, _) = crate::list::dropped_kinds();
     let copies_recorded = COPIES[0].load(Ordering::Relaxed);
     let indirect = crate::list::indirect_dropped();
-    let (r, heap_cleared, [dropped_unset_root, dropped_unmapped, dropped_failed, typed_views, resource_heaps], metal_mb) = with_title(|t| {
+    let (r, heap_cleared, [dropped_unset_root, dropped_unmapped, dropped_failed, typed_views, resource_heaps], metal_bytes) = with_title(|t| {
         let h = &t.host;
-        (h.backend.residency_counts(), h.cleared(), [h.unset_roots(), h.unmapped(), h.failed(), h.typed_views(), h.resource_heaps() as u64], victory_backend::backend::ComputeBackend::allocated_bytes(&h.backend) >> 20)
+        (h.backend.residency_counts(), h.cleared(), [h.unset_roots(), h.unmapped(), h.failed(), h.typed_views(), h.resource_heaps() as u64], victory_backend::backend::ComputeBackend::allocated_bytes(&h.backend))
     })
     .unwrap_or_default();
+    let metal_mb = metal_bytes >> 20;
     // Where the memory is when command buffers stall (#79): Metal's own count and the process footprint.
     #[cfg(target_os = "macos")]
     let footprint_mb = victory_platform::mem::footprint() >> 20;
@@ -2202,6 +2203,29 @@ pub(crate) fn log_draw_counts(frame: u64) {
     let no_pipeline_draws = DROPPED_DRAWS.load(Ordering::Relaxed);
     let no_pipeline_dispatches = DROPPED_DISPATCHES.load(Ordering::Relaxed);
     tracing::info!(frame, recorded, encoded, no_pipeline, no_pipeline_draws, no_pipeline_dispatches, no_texture, mesh, mesh_indirect, indirect, texture_copies = copies, copies_recorded, use_resource = r.use_resource, heap_resources = r.heap_resources, heap_entries = r.heap_entries, heap_allocations = r.heap_allocations, heap_set_mb = r.heap_set_bytes >> 20, metal_mb, footprint_mb, heap_cleared, dropped_unset_root, dropped_unmapped, dropped_failed, typed_views, resource_heaps, "native draws so far");
+    // What `metal_mb` is made of, by kind: the line above says how much the device holds, this says
+    // what holds it, so a run that fills the Mac can name the kind to cut. `other_mb` is what the
+    // counters do not account for (pipeline states, libraries, command buffers, Metal's own).
+    // The counters are Metal's (victory-metal is the macOS backend): nothing to say elsewhere.
+    #[cfg(target_os = "macos")]
+    {
+        let a = victory_metal::alloc::counts();
+        tracing::info!(
+            frame,
+            texture_mb = a.texture_bytes >> 20,
+            texture_allocations = a.texture_allocations,
+            texture_bytes = a.texture_bytes,
+            pool_mb = a.pool_bytes >> 20,
+            pool_allocations = a.pool_allocations,
+            pool_bytes = a.pool_bytes,
+            buffer_mb = a.buffer_bytes >> 20,
+            buffer_allocations = a.buffer_allocations,
+            buffer_bytes = a.buffer_bytes,
+            heap_mb = a.heap_bytes >> 20,
+            other_mb = metal_bytes.saturating_sub(a.bytes()) >> 20,
+            "native memory by kind (texture: host copies of title textures; pool: the title's own pages, wrapped by address; buffer: host upload and staging; heap: descriptor heaps' buffers; other: pipelines, libraries, command buffers)"
+        );
+    }
     if let Some(n) = super::host::heap_set_trace()
         && let Some([all, idle, never]) = with_title(|t| t.host.heap_set_report(n)).flatten()
     {

@@ -466,6 +466,22 @@ when command buffers stall (#79), `metal_mb` (the device's `currentAllocatedSize
 texture the title has released keeps it, alive and in the set, until the title overwrites the entry,
 as naming per encoder did; `useHeap` for `MTLHeap`-placed textures.
 
+### What Metal's memory holds, by kind
+
+`metal_mb` on "native draws so far" is `MTLDevice.currentAllocatedSize()`: how much the device
+holds, never what, so a full Mac cannot say which kind to cut. `victory_metal::alloc` counts live
+bytes and allocations for four kinds (process-wide), and one `native memory by kind` line
+follows the frame line with them:
+`texture` (host copies of title textures and the host's own targets), `pool` (no-copy buffers over
+title memory: the title's own pages, wrapped by address, not the host's extra), `buffer` (host
+uploads, staging, indirect records) and `heap` (descriptor heaps' own buffers).
+
+A `Counted { kind, bytes }` guard is a field of `Texture`, `Buffer` and `Heap` (its
+`MTLResource::allocatedSize` at creation) and its `Drop` takes the bytes back, so the count follows
+the resource to its last reference, not the call site; a texture view and a buffer-backed texture
+over a pool count nothing. `other_mb` is `metal_mb` less those four: pipelines, libraries, command
+buffers, Metal's own.
+
 ### Textures and samplers
 
 `create_texture` takes `TextureDesc`: 2D, 2D array, 3D; formats RGBA8 (unorm, sRGB), BGRA8, RGBA16F,

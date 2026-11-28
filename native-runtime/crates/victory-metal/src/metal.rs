@@ -208,6 +208,11 @@ pub struct Buffer {
     pub(crate) base: *const u8,
     /// The residency set it is in (so that dropping it leaves the set).
     pub(crate) resident: std::cell::RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
+    /// The bytes this buffer takes of `metal_mb`, taken back when the last reference goes: a wrap
+    /// of title memory counts as the title's pages (not the host's extra), a host buffer as the
+    /// host's own.
+    #[allow(dead_code)] // held for its Drop: it counts the bytes while the resource lives.
+    pub(crate) counted: crate::alloc::Counted,
 }
 
 impl Drop for Buffer {
@@ -581,10 +586,15 @@ impl ComputeBackend for Metal {
                 )
         }
         .ok_or("newBufferWithBytesNoCopy refused the range (alignment or size)")?;
+        let counted = crate::alloc::Counted::new(
+            crate::alloc::Kind::Pool,
+            MTLResource::allocatedSize(&*buf) as usize,
+        );
         Ok(Buffer {
             buf,
             base: ptr,
             resident: Default::default(),
+            counted,
         })
     }
 
@@ -594,10 +604,15 @@ impl ComputeBackend for Metal {
             .newBufferWithLength_options(len, MTLResourceOptions::StorageModeShared)
             .ok_or("no host buffer")?;
         let base = buf.contents().as_ptr().cast::<u8>();
+        let counted = crate::alloc::Counted::new(
+            crate::alloc::Kind::Buffer,
+            MTLResource::allocatedSize(&*buf) as usize,
+        );
         let buffer = Buffer {
             buf,
             base,
             resident: Default::default(),
+            counted,
         };
         Ok((buffer, base))
     }

@@ -112,6 +112,10 @@ fn frame_commit(tracing: bool, encode_start: &std::time::Instant, label: &str) -
 }
 
 pub struct Heap {
+    /// The bytes this heap's buffer takes of `metal_mb` (not what its entries name: those are
+    /// allocations of their own, counted where they were made).
+    #[allow(dead_code)] // held for its Drop: it counts the bytes while the heap lives.
+    counted: crate::alloc::Counted,
     buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     kind: HeapKind,
     count: usize,
@@ -155,6 +159,10 @@ pub struct Texture {
     tex: Retained<ProtocolObject<dyn MTLTexture>>,
     /// What the pixels are as Metal reads them: sizes the CPU transfers' bounds check.
     format: Format,
+    /// The bytes this texture takes of `metal_mb`, taken back when the last reference goes. A view
+    /// counts nothing: the allocation it views is counted once, by whoever made it.
+    #[allow(dead_code)] // held for its Drop: it counts the bytes while the resource lives.
+    counted: crate::alloc::Counted,
 }
 
 /// What a CPU transfer of a `w` x `h` x `d` mip needs of `format`: `(row bytes, total bytes)`, or the
@@ -1031,6 +1039,10 @@ impl ResourceBackend for Metal {
             None
         };
         Ok(Heap {
+            counted: crate::alloc::Counted::new(
+                crate::alloc::Kind::Heap,
+                MTLResource::allocatedSize(&*buf) as usize,
+            ),
             buf,
             kind,
             count,
@@ -1241,7 +1253,15 @@ impl ResourceBackend for Metal {
             .dev
             .newTextureWithDescriptor(&td)
             .ok_or("newTextureWithDescriptor failed")?;
-        Ok(Texture { tex, format: d.format })
+        let counted = crate::alloc::Counted::new(
+            crate::alloc::Kind::Texture,
+            MTLResource::allocatedSize(&*tex) as usize,
+        );
+        Ok(Texture {
+            tex,
+            format: d.format,
+            counted,
+        })
     }
 
     fn create_texture_view(&self, t: &Texture, v: &ViewDesc) -> Result<Texture, String> {
@@ -1286,7 +1306,11 @@ impl ResourceBackend for Metal {
                 .newTextureViewWithPixelFormat_textureType_levels_slices(format, ty, levels, layers)
         }
         .ok_or("newTextureView refused (format not view-compatible)")?;
-        Ok(Texture { tex, format: title_format })
+        Ok(Texture {
+            tex,
+            format: title_format,
+            counted: crate::alloc::Counted::none(),
+        })
     }
 
     fn create_texture_over_memory(
@@ -1321,7 +1345,11 @@ impl ResourceBackend for Metal {
             .buf
             .newTextureWithDescriptor_offset_bytesPerRow(&td, offset, row_pitch)
             .ok_or("buffer-backed texture refused (offset, pitch or format)")?;
-        Ok(Texture { tex, format: d.format })
+        Ok(Texture {
+            tex,
+            format: d.format,
+            counted: crate::alloc::Counted::none(),
+        })
     }
 
     fn linear_alignment(&self, f: Format) -> usize {
@@ -3441,8 +3469,16 @@ impl Metal {
             td.setWidth(max_width);
             td.setHeight(max_height);
         }
+        let tex = self
+            .dev
+            .newTextureWithDescriptor(&td)
+            .ok_or("no rectangular clear texture")?;
         let scratch = Texture {
-            tex: self.dev.newTextureWithDescriptor(&td).ok_or("no rectangular clear texture")?,
+            counted: crate::alloc::Counted::new(
+                crate::alloc::Kind::Texture,
+                MTLResource::allocatedSize(&*tex) as usize,
+            ),
+            tex,
             format: target.format,
         };
         self.encode_render(

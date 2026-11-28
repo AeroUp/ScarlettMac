@@ -4,6 +4,7 @@
 //! Converter loaded at run time, `mem` page-aligned host reservations for tests and probes.
 
 pub use victory_backend::{backend, resources};
+pub mod alloc;
 #[cfg(target_os = "macos")]
 mod ambient;
 #[cfg(target_os = "macos")]
