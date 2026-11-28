@@ -2592,6 +2592,7 @@ impl<B: PresentBackend> Title<B> {
         budget: Option<std::time::Duration>,
         scan_budget: u64,
     ) -> Vec<Job> {
+        let _timed = super::locktime::time(super::locktime::Part::Jobs);
         self.sync_serial = self.sync_serial.wrapping_add(1);
         // A host writer may have opened a released copy's pages since the last sync (DirectStorage
         // staging, a file read, XG tiling): those bytes are new, so the copy goes before the
@@ -4241,6 +4242,7 @@ impl<B: PresentBackend> Title<B> {
         if !self.names_wanted() {
             return HashSet::new();
         }
+        let _timed = super::locktime::time(super::locktime::Part::Names);
         // shortcut: a record changed after this read (before held work is encoded) still gets the
         // cleared entry and `take_wanted`; reading again at encoding needs the title's state there.
         let held: Vec<Rc<NativeList<B>>> = self.held.segments().cloned().collect();
@@ -4256,6 +4258,7 @@ impl<B: PresentBackend> Title<B> {
         // and a record a table names later makes it again as for any given-up copy.
         let named = self.host.resources_named(all.iter().copied());
         // For the trace: what only a heap a shader indexes shows, which the budget may take.
+        let heap_shown = super::locktime::time(super::locktime::Part::HeapShown);
         let shown = self.host.shown_by_indexed_heaps(all.iter().copied());
         let only_heap = shown.iter().filter(|k| !named.contains(k));
         let bytes: u64 = only_heap
@@ -4273,6 +4276,7 @@ impl<B: PresentBackend> Title<B> {
         HEAP_ONLY[1].store(count, std::sync::atomic::Ordering::Relaxed);
         HEAP_ONLY[2].store(named_bytes, std::sync::atomic::Ordering::Relaxed);
         HEAP_ONLY[3].store(named.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        drop(heap_shown);
         // The submission about to be encoded is the next GPU epoch: a copy it names stays until
         // the work queued so far has finished, which is when the GPU has read the entries this
         // submission and the ones before it could name.
@@ -4343,6 +4347,7 @@ impl<B: PresentBackend> Title<B> {
         if !check && !trace && !idle_due {
             return;
         }
+        let _timed = super::locktime::time(super::locktime::Part::Budget);
         // Copied from a heap entry is only safe once the work that could have read it has finished.
         self.retire_gpu_epochs();
         if check {

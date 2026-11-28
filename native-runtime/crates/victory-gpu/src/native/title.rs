@@ -561,6 +561,7 @@ impl<B: PresentBackend> Title<B> {
         if self.held.is_empty() {
             return;
         }
+        let _timed = super::locktime::time(super::locktime::Part::Pump);
         let Title {
             host,
             queues,
