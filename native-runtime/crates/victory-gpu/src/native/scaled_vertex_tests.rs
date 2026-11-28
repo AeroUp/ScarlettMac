@@ -11,14 +11,14 @@ use victory_backend::resources::{Format, ResourceBackend, TextureDesc, Topology}
 use victory_metal::mem::{Alias, page_size};
 use victory_shader::{emit::graphics, native::HwStage};
 
-fn translate(stage: HwStage, words: &[u32], rect: bool) -> victory_shader::emit::HostShader {
+pub(super) fn translate(stage: HwStage, words: &[u32], rect: bool) -> victory_shader::emit::HostShader {
     let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let container = graphics::container(stage, &bytes, &[0; 0x10]).unwrap();
     shaders::translate_extra(&container, rect, 0, [0; 32]).unwrap()
 }
 
 // Assembled with llvm-mc -triple=amdgcn -mcpu=gfx1030 -show-encoding.
-fn vertex(format: u32, count: u32, rect: bool) -> victory_shader::emit::HostShader {
+pub(super) fn vertex(format: u32, count: u32, rect: bool) -> victory_shader::emit::HostShader {
     translate(
         HwStage::Vs,
         &[

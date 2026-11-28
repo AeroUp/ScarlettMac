@@ -281,6 +281,9 @@ pub struct Binding {
     pub heap: bool,
     /// The pipeline's name (its shaders' hashes), for diagnostics.
     pub name: Rc<str>,
+    /// Attributes a vertex shader reads through the input assembler (0: none, its vertices are
+    /// its own to fetch, e.g. from views), for diagnostics (`VICTORY_TRACE_GPU_VERTICES`).
+    pub vertex_attributes: usize,
 }
 
 /// A root view's kind.
@@ -330,6 +333,7 @@ impl Binding {
             heap_typed_buffers: typed_buffers && shader.heap,
             heap: shader.heap,
             name: "".into(),
+            vertex_attributes: 0,
         }
     }
 

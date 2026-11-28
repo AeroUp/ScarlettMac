@@ -164,7 +164,7 @@ pub(crate) fn dump(dir: &Path, n: usize, b: &Bound<'_>) {
 
 /// What one element's channel values cover over the vertices read.
 #[derive(Default)]
-struct Stats {
+pub(crate) struct Stats {
     seen: usize,
     min: Vec<f64>,
     max: Vec<f64>,
@@ -174,7 +174,7 @@ struct Stats {
 }
 
 impl Stats {
-    fn add(&mut self, format: VertexFormat, b: &[u8]) {
+    pub(crate) fn add(&mut self, format: VertexFormat, b: &[u8]) {
         self.seen += 1;
         for (c, v) in channels(format, b).into_iter().enumerate() {
             if self.min.len() <= c {

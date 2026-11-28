@@ -359,7 +359,7 @@ impl<B: PresentBackend> Title<B> {
             tracing::info!(name, stencil = ?g.stencil(), depth = ?g.depth_test(), ?color_state, "guessed pipeline state");
         }
         let ps_full = ps.map(|ps| Binding { name: name.into(), ..Binding::of(ps) });
-        let mut vs_binding = Binding { name: name.into(), ..Binding::of(vs) };
+        let mut vs_binding = Binding { name: name.into(), vertex_attributes: reads.len(), ..Binding::of(vs) };
         if let Some(p) = &ps_full {
             vs_binding.typed_buffers |= p.typed_buffers;
             vs_binding.heap_typed_buffers |= p.heap_typed_buffers;

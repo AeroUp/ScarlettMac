@@ -2619,6 +2619,113 @@ impl<B: GraphicsBackend> NativeHost<B> {
         out
     }
 
+    /// `VICTORY_TRACE_GPU_VERTICES`: the ranges of the buffer resources and of the host's own
+    /// buffers, `[start, end)` by start (for sizing root views, which carry no size).
+    #[cfg(target_os = "macos")]
+    pub(super) fn buffer_spans(&self) -> Vec<(u64, u64)> {
+        let mut spans: Vec<(u64, u64)> = self
+            .resources
+            .borrow()
+            .values()
+            .filter_map(|r| match r {
+                Res::Buffer(a, n) if *n > 0 => Some((*a, a.saturating_add(*n))),
+                _ => None,
+            })
+            .chain(self.own.borrow().iter().map(|(&(s, _), &(e, _))| (s, e)))
+            .collect();
+        spans.sort_unstable();
+        spans
+    }
+
+    /// `VICTORY_TRACE_GPU_VERTICES`: the buffer views vertex shader binding `b` reads from `root`:
+    /// its root shader-resource and unordered-access views (and those it reads the address of),
+    /// and the buffer views in the entries its tables reach. A buffer view the host makes no
+    /// buffer of is `null`. shortcut: entries a heap-indexing shader computes are not seen.
+    #[cfg(target_os = "macos")]
+    pub(super) fn vs_views(&self, root: &[Option<Root<B>>], b: &Binding) -> Vec<super::gpu_vertex_trace::VsView> {
+        use super::gpu_vertex_trace::{Via, VsView};
+        use crate::descriptor::View;
+        const BUFFER: u32 = 1;
+        let mut out = Vec::new();
+        let mut slots: Vec<u8> = b
+            .views
+            .iter()
+            .filter(|&&(s, k)| s != victory_shader::emit::VIEW_STRIDES && k != super::list::View::Cbv)
+            .map(|&(s, _)| s)
+            .chain(
+                b.user_data
+                    .iter()
+                    .filter(|u| u.root == victory_shader::RootType::Descriptor && u.slot != victory_shader::emit::DISPATCH_THREADS)
+                    .map(|u| u.slot),
+            )
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        for slot in slots {
+            if let Some(Some(Root::View(a))) = root.get(usize::from(slot)) {
+                out.push(VsView { via: Via::Root(slot), addr: *a, size: 0, null: *a == 0 });
+            }
+        }
+        let resources = self.resources.borrow();
+        for &(slot, count) in &b.table_entries {
+            let Some(Some(Root::Table(h, at))) = root.get(usize::from(slot)) else { continue };
+            if h.kind != HeapKind::Resource {
+                continue;
+            }
+            for index in *at..(*at + count.min(256)).min(h.count) {
+                let Some(view) = crate::descriptor::view(h.start + index as u64 * Self::step(h.kind)) else { continue };
+                let buffer = match &view {
+                    View::Shader(_, Some(d)) | View::Unordered(_, _, Some(d)) => d[1] == BUFFER,
+                    View::Shader(r, None) | View::Unordered(r, _, None) => matches!(resources.get(r), Some(Res::Buffer(..))),
+                    View::Placed(_, res, _) => res[0] == BUFFER,
+                    _ => false,
+                };
+                if !buffer {
+                    continue;
+                }
+                let via = Via::Table(slot, (index - at) as u32);
+                out.push(match decode(&view, &resources) {
+                    Some(Decoded::Buffer { addr, size }) => VsView { via, addr, size: u64::from(size), null: false },
+                    _ => VsView { via, addr: 0, size: 0, null: true },
+                });
+            }
+        }
+        out
+    }
+
+    /// `VICTORY_TRACE_GPU_VERTICES`: how much of `[addr, addr + len)` the title maps, and what
+    /// the host makes of it. A table view over a gap or unmapped memory is the null view
+    /// ([`Self::title_alias`]); a root view (`root`) is resolved at its address alone.
+    #[cfg(target_os = "macos")]
+    pub(super) fn coverage(&self, addr: u64, len: u64, root: bool) -> (u64, &'static str) {
+        let len = len.max(1);
+        let own = |a: u64, n: u64| {
+            a.checked_add(n).is_some_and(|end| {
+                self.own
+                    .borrow()
+                    .range(..=(a, usize::MAX))
+                    .next_back()
+                    .is_some_and(|(&(s, _), &(stop, _))| s <= a && end <= stop)
+            })
+        };
+        if self.memory.resolve(addr, len).is_some() {
+            return (len, "one pool run");
+        }
+        if own(addr, len) {
+            return (len, "the host's own memory");
+        }
+        let mapped: u64 = self.memory.pool_ranges(addr, len).iter().map(|r| r.2).sum();
+        if mapped >= len {
+            return (len, "title pages, wrapped");
+        }
+        match (root, mapped) {
+            (true, _) if self.memory.resolve(addr, 1).is_some() || own(addr, 1) => (mapped, "a root view whose range has a gap"),
+            (true, _) => (mapped, "a root view unmapped at its address: the null view"),
+            (false, 0) => (0, "unmapped: the null view"),
+            (false, _) => (mapped, "a gap: the null view"),
+        }
+    }
+
     /// `VICTORY_TRACE_CONTENT=<dir>`: for the first draws into a depth target, every texture and
     /// constant buffer their descriptor tables hold: its view, the fraction of its title memory
     /// that is non-zero, and (8-bit colour textures) the title memory detiled and the host
@@ -2851,6 +2958,15 @@ impl<B: GraphicsBackend> NativeHost<B> {
                     self.trace_draw(root, binding.as_deref(), false);
                 }
                 self.remirror_tables(root, binding.as_deref());
+                #[cfg(target_os = "macos")]
+                if super::gpu_vertex_trace::on() {
+                    let indexed = match (call, index) {
+                        (DrawCall::Indexed { .. }, Some((a, size, _))) => Some((*a, *size)),
+                        _ => None,
+                    };
+                    let mesh = matches!(call, DrawCall::Mesh { .. });
+                    super::gpu_vertex_trace::draw(self, root, binding.as_deref(), vertex, indexed, mesh);
+                }
                 self.materialize_typed_buffers(root, binding.as_deref(), heaps.0.as_ref());
                 self.trace_root_span(root, binding.as_deref(), &[0; 3]);
                 self.trace_content(root, vertex, call, binding.as_deref(), targets);

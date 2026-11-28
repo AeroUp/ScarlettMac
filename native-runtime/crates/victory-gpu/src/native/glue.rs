@@ -1064,6 +1064,9 @@ pub(crate) fn present(queue: This, planes: &[This]) {
     if tracing_record_writers() {
         trace_record_writers();
     }
+    if super::gpu_vertex_trace::on() {
+        super::gpu_vertex_trace::present();
+    }
     super::rt::present();
     dump_depth_targets();
     if tracing_targets() {
@@ -2348,6 +2351,7 @@ fn dropped_dispatch(t: &MetalTitle, l: &mut MetalList, how: &str) {
     }
     dropped("a dispatch without a host compute pipeline");
     drop_shaders(l.pipeline, true);
+    trace_dropped_writes(t, l);
     if pass_on() {
         pass_note(t, l, &format!("dispatch {how}"), "a dispatch without a host compute pipeline", true, 1);
     }
@@ -2364,6 +2368,14 @@ fn dropped_dispatch(t: &MetalTitle, l: &mut MetalList, how: &str) {
             })
             .collect();
         trace_drop_pipe(format!("{:?} {how} uavs {uavs:?}", stage_hashes(l.pipeline)));
+    }
+}
+
+/// `VICTORY_TRACE_GPU_VERTICES`: what a dispatch dropped for want of a host compute pipeline
+/// may have written this frame, for the draws that read it (`gpu_vertex_trace`).
+fn trace_dropped_writes(t: &MetalTitle, l: &MetalList) {
+    if super::gpu_vertex_trace::on() {
+        super::gpu_vertex_trace::dropped_dispatch(&t.host, l.list.compute_args(), &stage_hashes(l.pipeline).join(" "));
     }
 }
 
@@ -2465,6 +2477,7 @@ pub(crate) fn dispatch_threads(this: This, threads: [u32; 3]) {
             _ => {
                 dropped("a dispatch of thread counts without a host compute pipeline");
                 drop_shaders(l.pipeline, true);
+                trace_dropped_writes(t, l);
                 if pass_on() {
                     pass_note(t, l, &format!("dispatch-threads{threads:?}"), "a dispatch of thread counts without a host compute pipeline", true, 1);
                 }

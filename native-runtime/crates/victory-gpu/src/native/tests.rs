@@ -16,6 +16,8 @@ use victory_metal::metal::Metal;
 
 #[path = "addr_tests.rs"]
 mod addr_tests;
+#[path = "gpu_vertex_tests.rs"]
+mod gpu_vertex_tests;
 #[path = "heap_tests.rs"]
 mod heap_tests;
 #[path = "legacy_fma_tests.rs"]
