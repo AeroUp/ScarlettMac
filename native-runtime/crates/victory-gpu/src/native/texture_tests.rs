@@ -3492,6 +3492,41 @@ fn over_budget_a_released_copy_is_put_back_and_given_up() {
     assert_eq!(pool.read::<u8>(at, size), console, "the title's pages hold the bytes, byte for byte");
 }
 
+/// Over budget, an idle copy's pages are not given back: the budget's check takes that same copy,
+/// and taking a released one means re-tiling it from the GPU into the title's pages first, work
+/// thrown away at once. Back under the limit, the idle copy is released as before.
+#[test]
+fn over_budget_nothing_is_released() {
+    assert!(victory_platform::faults::install(|_| false), "the page helper starts");
+    let Some((mut t, pool)) = budget_title() else { return };
+    t.set_release_pages(true);
+    let base = pool.va(0) as usize;
+    let at = (0x4000 - base % 0x4000) % 0x4000;
+    let res = crate::resource::test_texture_at(pool.va(at), (128, 128), 1, 28, Swizzle::SW_4KB_S.0, 0);
+    let info = crate::resource::texture_info(res).unwrap();
+    let (key, size) = (res as usize, info.size);
+    pool.write(at, &vec![0x31u8; size]);
+    t.texture_created(key, info);
+    assert!(t.realize(key));
+    t.sync_textures();
+    let now = std::time::Instant::now();
+    t.set_texture_last_used_at(key, now - std::time::Duration::from_secs(3600));
+
+    // One byte under what the copy holds: over the budget, so nothing is released.
+    let live = t.budget.live;
+    t.set_texture_budget(live - 1);
+    t.release_quiescent_at(crate::queue::presented(), now);
+    assert!(!t.is_released(key), "over budget, the idle copy is the budget's to take");
+    assert_eq!(t.released_bytes(), 0);
+
+    // At the limit (not over it), the same idle copy gives its pages back.
+    t.set_texture_budget(live);
+    t.release_quiescent_at(crate::queue::presented(), now);
+    assert!(t.is_released(key), "under budget, an idle copy is released");
+    assert_eq!(t.released_bytes(), size as u64);
+    assert!(t.restore_pages(key), "and put back, so the pool's pages are open again");
+}
+
 /// A copy a submission named is taken only after everything colder: giving it up made the next
 /// draws decode and upload it again, which was most of a world frame under the host lock. When
 /// nothing colder is left the cap still wins.
@@ -3602,17 +3637,28 @@ fn decoded_copies_are_reported_by_reason() {
     let (mips, mips_bytes) = make(&mut t, 0x8000, (32, 32), 2, 28, Swizzle::LINEAR.0, 0, 0x33);
     let (converted, converted_bytes) = make(&mut t, 0xC000, (16, 16), 1, 115, Swizzle::LINEAR.0, 0, 0x44);
     let (depth, depth_bytes) = make(&mut t, 0xE000, (16, 16), 1, 45, Swizzle::LINEAR.0, 2, 0x55);
+    // 71 = BC1_UNORM, tiled: one image, and a mip chain (the typical streamed asset).
+    let (bc_one, bc_one_bytes) = make(&mut t, 0x10000, (64, 64), 1, 71, Swizzle::SW_4KB_S.0, 0, 0x66);
+    let (bc_mips, bc_mips_bytes) = make(&mut t, 0x14000, (64, 64), 2, 71, Swizzle::SW_4KB_S.0, 0, 0x77);
     let r = t.decoded_report();
     assert!(t.is_zero_copy(free) && !t.is_zero_copy(tiled));
+    assert!(!t.is_zero_copy(depth) && !t.is_zero_copy(bc_one) && !t.is_zero_copy(bc_mips));
     assert_eq!(r.zero_copy, free_bytes, "the linear sampled one is not copied");
     assert_eq!(r.zero_copy_copies, 1);
     assert_eq!(r.tiled, tiled_bytes, "a tiled layout needs a copy");
-    assert_eq!(r.layout, mips_bytes, "a mip chain needs a copy");
+    assert_eq!(r.layout, mips_bytes, "an uncompressed mip chain needs a copy: {r:?}");
     assert_eq!(r.format, converted_bytes, "a converted format needs a copy");
     assert_eq!(r.depth, depth_bytes, "depth needs a copy");
+    assert_eq!(r.bcpack, bc_one_bytes, "a block-compressed image is counted once: {r:?}");
+    assert_eq!(r.bc_mipped, bc_mips_bytes, "a tiled BC mip chain is BC, not layout or tiling: {r:?}");
     assert_eq!(r.written, depth_bytes, "of them, the depth target is GPU-written");
-    assert_eq!(r.other + r.alignment + r.multisampled + r.bcpack, 0);
-    assert_eq!(r.zero_copy + r.tiled + r.layout + r.format + r.depth, free_bytes + tiled_bytes + mips_bytes + converted_bytes + depth_bytes);
+    assert_eq!(r.other + r.alignment + r.multisampled, 0);
+    // Each copy under one reason: the reasons are the decoded pool, byte for byte.
+    let reasons = r.tiled + r.bcpack + r.bc_mipped + r.format + r.depth + r.layout + r.multisampled + r.alignment + r.other;
+    assert_eq!(reasons, t.budget_live_for_test(), "the reasons add up to the decoded pool: {r:?}");
+    assert_eq!(r.reasons().iter().sum::<u64>(), r.decoded);
+    assert_eq!(r.decoded, t.budget_live_for_test());
+    assert_eq!(r.written + r.sampled_only, r.decoded, "written or sampled only, nothing else");
 }
 
 /// Of the decoded pool, the bytes a block permutation could turn into the title's own pages: a

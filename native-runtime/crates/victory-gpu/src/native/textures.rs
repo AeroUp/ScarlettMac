@@ -1370,21 +1370,23 @@ impl<B: PresentBackend> Title<B> {
         }
         // One buffer-backed texture is one 2D image of one mip: a linear mip chain (smallest
         // first) or a slice stack is not one.
-        if info.dimension != Dimension::Tex2d
-            || info.depth_or_layers != 1
-            || info.layout.mips.len() != 1
-            || info.layout.mips[0].depth > 1
-            || info.dropped_levels() != 0
-            || desc.mips != 1
-            || desc.width != info.width as usize
-            || desc.height != info.height as usize
-        {
-            return Some(Decoded::Layout);
-        }
+        let one_image = info.dimension == Dimension::Tex2d
+            && info.depth_or_layers == 1
+            && info.layout.mips.len() == 1
+            && info.layout.mips[0].depth <= 1
+            && info.dropped_levels() == 0
+            && desc.mips == 1
+            && desc.width == info.width as usize
+            && desc.height == info.height as usize;
         // Block-compressed bytes cannot be a texture over a buffer at all (Metal asserts on the
-        // alignment query), so BC1-BC7 are decoded whatever their layout.
+        // alignment query), so BC1-BC7 are decoded whatever their layout or tiling. Checked
+        // before both, so the report tells a streamed asset (BC, tiled, a mip chain) from an
+        // uncompressed mip chain or tiling, which a host could some day alias.
         if desc.format.block().0 == 4 {
-            return Some(Decoded::BcPack);
+            return Some(if one_image { Decoded::BcPack } else { Decoded::BcMipped });
+        }
+        if !one_image {
+            return Some(Decoded::Layout);
         }
         // The host must read the console's bytes as its own: DXGI B4G4R4A4's nibbles are rotated
         // on upload, and a format Metal lacks is never a texture at all.
@@ -3224,6 +3226,15 @@ pub fn release_pages_on() -> bool {
     *ON.get_or_init(|| !std::env::var("VICTORY_TEXTURE_RELEASE_PAGES").is_ok_and(|v| v == "0"))
 }
 
+/// The process's resident bytes and `phys_footprint`, as the memory line samples them (0 off
+/// macOS): `VICTORY_TRACE_RELEASE_RSS` logs both across a release batch.
+fn resident_and_footprint() -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    return (victory_platform::mem::resident() as u64, victory_platform::mem::footprint() as u64);
+    #[cfg(not(target_os = "macos"))]
+    (0, 0)
+}
+
 /// Pages given back to the OS by [`Title::release_pages`], and the titles whose pages are out.
 static RELEASED_TRACE: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
 
@@ -3265,16 +3276,20 @@ pub fn release_frames() -> u64 {
 /// answer to "why is the copy pool this big" (`glue::memory_parts`).
 #[derive(Default, Clone, Copy, Debug)]
 pub struct DecodedReport {
-    /// The console's swizzle is not linear (the largest reason for a world).
+    /// Bytes of every decoded copy: the reasons below (`tiled` to `other`) add up to it exactly,
+    /// each copy counted once under the first reason [`Title::decoded_reason`] finds.
+    pub decoded: u64,
+    /// Uncompressed, one image, and the console's swizzle is not linear.
     pub tiled: u64,
-    /// Block-compressed (BCPack's output, unpacked by the title): a part of the decoded pool,
-    /// whatever the reason it is decoded for.
+    /// Block-compressed (BCPack's output, unpacked by the title), one image of one mip.
     pub bcpack: u64,
+    /// Block-compressed with a mip chain, slices or a volume: the typical streamed asset.
+    pub bc_mipped: u64,
     /// A format Metal cannot read as the console's bytes.
     pub format: u64,
     /// Depth and stencil.
     pub depth: u64,
-    /// A mip chain, a slice stack or a volume.
+    /// Uncompressed, and a mip chain, a slice stack or a volume.
     pub layout: u64,
     /// Multisampled.
     pub multisampled: u64,
@@ -3282,27 +3297,68 @@ pub struct DecodedReport {
     pub alignment: u64,
     /// A copy Metal could have taken from title memory (zero-copy off, or creation refused).
     pub other: u64,
-    /// Of the decoded copies, those the GPU writes (render targets, depth, unordered access).
+    /// Of the decoded copies, those the GPU writes (render targets, depth, unordered access), and
+    /// the rest, which hold only the title's bytes (what page release and the budget act on):
+    /// the two add up to `decoded`.
     pub written: u64,
+    pub sampled_only: u64,
     /// Bytes and count sampled or rendered where the title wrote them.
     pub zero_copy: u64,
     pub zero_copy_copies: u64,
     /// Of the decoded copies, those a block permutation could turn into the pages themselves
-    /// ([`Title::in_place_bytes`]): block-compressed, tiled, one mip, sampled only, and their
-    /// linear image fits the bytes the title allocated. Decoding those in place would leave one
-    /// resident copy instead of two.
+    /// ([`Title::in_place_bytes`]): uncompressed, tiled, one mip, sampled only, and their linear
+    /// image fits the bytes the title allocated. Decoding those in place would leave one resident
+    /// copy instead of two.
     pub in_place: u64,
     pub in_place_copies: u64,
 }
 
+impl DecodedReport {
+    /// The reasons, in the memory line's order: `tiled`, `bcpack`, `bc_mipped`, `format`,
+    /// `depth`, `layout`, `multisampled`, `alignment`, `other`. They add up to `decoded`.
+    pub fn reasons(&self) -> [u64; 9] {
+        [
+            self.tiled,
+            self.bcpack,
+            self.bc_mipped,
+            self.format,
+            self.depth,
+            self.layout,
+            self.multisampled,
+            self.alignment,
+            self.other,
+        ]
+    }
+
+    /// [`Self::reasons`] in whole MiB that add up to `decoded >> 20` exactly: each is rounded
+    /// down, and the MiB the rounding lost go to those with the largest remainders.
+    pub fn reasons_mib(&self) -> [u64; 9] {
+        let bytes = self.reasons();
+        let mut mib = bytes.map(|b| b >> 20);
+        let total = bytes.iter().sum::<u64>() >> 20;
+        let mut short = total.saturating_sub(mib.iter().sum());
+        let mut order: Vec<usize> = (0..bytes.len()).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(bytes[i] & ((1 << 20) - 1)), i));
+        for i in order {
+            if short == 0 {
+                break;
+            }
+            mib[i] += 1;
+            short -= 1;
+        }
+        mib
+    }
+}
+
 impl<B: PresentBackend> Title<B> {
     /// The bytes of `t`'s decoded copy when a block permutation of the title's own pages could
-    /// hold Metal's linear image in the same bytes (`None`: it cannot). The console's tiling of a
-    /// block-compressed format moves whole blocks, and BC1-BC7 are Metal's own formats, so BC in
-    /// and BC out are the same bytes: the copy would be the pages themselves, no second resident
-    /// copy. What keeps this from being done is the title's own later use of those pages (a mip
-    /// streamed into them, a copy out of them), which needs write protection; this measures what
-    /// would be won.
+    /// hold Metal's linear image in the same bytes (`None`: it cannot): an uncompressed, tiled,
+    /// single-mip 2D texture that is only sampled. The console's tiling moves whole elements and
+    /// the format is Metal's own, so the copy would be the pages themselves, no second resident
+    /// copy. Block-compressed textures do not qualify: Metal cannot make a texture over a buffer
+    /// in a BC format. What keeps this from being done is the title's own later use of those
+    /// pages (a mip streamed into them, a copy out of them), which needs write protection; this
+    /// measures what would be won.
     fn in_place_bytes(&self, t: &Tracked<B>) -> Option<u64> {
         if t.zero_copy {
             return None;
@@ -3489,8 +3545,12 @@ impl<B: PresentBackend> Title<B> {
     /// [`Self::release_quiescent`] at `now`: a copy goes once it has gone unused for the seconds
     /// threshold **or** the frames threshold, whichever comes first (a paged world's frames are
     /// minutes apart; a fast title's seconds pass between two of its frames).
+    ///
+    /// Nothing is released while the copies are over the budget: the budget's next check would
+    /// take those same idle copies, and to take a released one it first re-tiles it back into
+    /// the title's pages from the GPU ([`Self::keep_to_budget_at`]), work thrown away at once.
     pub(super) fn release_quiescent_at(&mut self, frame: u64, now: std::time::Instant) {
-        if !self.release_pages || self.budget.limit == 0 {
+        if !self.release_pages || self.budget.limit == 0 || self.budget.live > self.budget.limit {
             return;
         }
         let (quiet_secs, quiet_frames) = (release_seconds(), release_frames());
@@ -3504,8 +3564,32 @@ impl<B: PresentBackend> Title<B> {
             })
             .map(|(&k, _)| k)
             .collect();
+        // `VICTORY_TRACE_RELEASE_RSS`: whether giving pages back frees any RAM. The pool's Metal
+        // buffer maps the same pages (`newBufferWithBytesNoCopy`), which may keep them resident.
+        let trace = env_set!("VICTORY_TRACE_RELEASE_RSS") && !keys.is_empty();
+        let before = trace.then(resident_and_footprint);
+        let (mut copies, mut bytes) = (0u64, 0u64);
         for key in keys {
-            self.release_pages(key);
+            if self.release_pages(key) {
+                copies += 1;
+                bytes += self.released.get(&key).copied().unwrap_or(0);
+            }
+        }
+        if let Some((resident, footprint)) = before
+            && copies > 0
+        {
+            let (resident_after, footprint_after) = resident_and_footprint();
+            let mib = |after: u64, before: u64| ((after as f64 - before as f64) / 1048576.0 * 10.0).round() / 10.0;
+            tracing::info!(
+                released_copies = copies,
+                released_mib = (bytes as f64 / 1048576.0 * 10.0).round() / 10.0,
+                released_total_mib = self.released_bytes() >> 20,
+                resident_delta_mib = mib(resident_after, resident),
+                footprint_delta_mib = mib(footprint_after, footprint),
+                resident_mib = resident_after >> 20,
+                footprint_mib = footprint_after >> 20,
+                "release batch: decoded copies' title pages given back, and the process's resident size and footprint across the batch"
+            );
         }
     }
 
@@ -3531,20 +3615,22 @@ impl<B: PresentBackend> Title<B> {
                 r.zero_copy_copies += 1;
                 continue;
             }
-            let desc = t.info.host_desc_with(t.dropped);
-            if desc.as_ref().is_some_and(|d| d.format.block().0 == 4) {
-                r.bcpack += size;
-            }
+            r.decoded += size;
             if self.in_place_bytes(t).is_some() {
                 r.in_place += size;
                 r.in_place_copies += 1;
             }
             if t.info.render_target() || t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
                 r.written += size;
+            } else {
+                r.sampled_only += size;
             }
+            // One reason per copy, so the reasons add up to `decoded`.
+            let desc = t.info.host_desc_with(t.dropped);
             match desc.as_ref().and_then(|d| self.decoded_reason(&t.info, d)) {
                 Some(Decoded::Tiled) => r.tiled += size,
                 Some(Decoded::BcPack) => r.bcpack += size,
+                Some(Decoded::BcMipped) => r.bc_mipped += size,
                 Some(Decoded::Format) => r.format += size,
                 Some(Decoded::Depth) => r.depth += size,
                 Some(Decoded::Layout) => r.layout += size,
@@ -3563,17 +3649,20 @@ impl<B: PresentBackend> Title<B> {
 pub enum Decoded {
     /// The console's swizzle (4KB_S, 64KB_*, ...) is not linear.
     Tiled,
-    /// Block-compressed (BC1-BC7: BCPack's output, unpacked by the title). Metal has the formats
-    /// but not over a buffer: `minimumLinearTextureAlignmentForPixelFormat` asserts "linear
-    /// textures do not support compressed pixel formats", so these always need a decoded copy.
+    /// Block-compressed (BC1-BC7: BCPack's output, unpacked by the title), one image of one mip.
+    /// Metal has the formats but not over a buffer: `minimumLinearTextureAlignmentForPixelFormat`
+    /// asserts "linear textures do not support compressed pixel formats", so these always need a
+    /// decoded copy.
     BcPack,
+    /// Block-compressed with a mip chain, slices or a volume (a streamed asset): as `BcPack`.
+    BcMipped,
     /// The format is not Metal's own bytes for it (a conversion on upload, such as DXGI
     /// `B4G4R4A4`'s rotated nibbles).
     Format,
     /// Depth and stencil: Metal's depth texel layout and the host's depth twins.
     Depth,
-    /// More than one mip, or a slice/array or 3D volume, which one buffer-backed texture cannot
-    /// hold: the mip chain is packed into the title's linear layout.
+    /// Uncompressed, with more than one mip, or a slice/array or 3D volume, which one
+    /// buffer-backed texture cannot hold: the mip chain is packed into the title's linear layout.
     Layout,
     /// Multisampled.
     Multisampled,
@@ -4189,6 +4278,27 @@ mod tests {
         assert!(idle_enough(now, used(1), 0, 601, 20, 600));
         // A just-used copy at frame 601 with a fresh clock: frames decide.
         assert!(!idle_enough(now, used(1), 601, 601, 20, 600));
+    }
+
+    /// The memory line's reasons in whole MiB add up to the decoded pool's MiB: rounding each
+    /// down alone would lose up to a MiB per reason.
+    #[test]
+    fn the_reasons_in_mib_add_up_to_the_decoded_pool() {
+        let half = 1u64 << 19;
+        let r = DecodedReport {
+            tiled: (3 << 20) + half + 1,
+            bcpack: (2 << 20) + half,
+            bc_mipped: 700 << 20,
+            layout: half - 1,
+            decoded: (3 << 20) + half + 1 + (2 << 20) + half + (700 << 20) + half - 1,
+            ..Default::default()
+        };
+        assert_eq!(r.reasons().iter().sum::<u64>(), r.decoded);
+        let mib = r.reasons_mib();
+        assert_eq!(mib.iter().sum::<u64>(), r.decoded >> 20, "{mib:?}");
+        // 706.5 MiB, 705 rounded down one by one: the lost MiB goes to the largest remainder.
+        assert_eq!(&mib[..3], &[4, 2, 700]);
+        assert_eq!(mib[5], 0);
     }
 
     /// A title texture at `memory`, for the [`written_twin`] test.

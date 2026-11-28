@@ -502,27 +502,31 @@ fn spawn_memory_report() {
             "the render targets the title created, largest first (bytes of title memory)"
         );
         // Why the decoded copies are needed, and how much is sampled where the title wrote it:
-        // a small pool means most of the title's textures are not copied at all.
+        // a small pool means most of the title's textures are not copied at all. Each copy has
+        // one reason, and the reasons' MiB add up to `decoded_mib` (`DecodedReport::reasons_mib`).
+        let [tiled, bcpack, bc_mipped, format, depth, layout, multisampled, alignment, other] = decoded.reasons_mib();
         tracing::info!(
             zero_copy_mib = decoded.zero_copy >> 20,
             zero_copy_textures = decoded.zero_copy_copies,
-            decoded_mib = copies >> 20,
-            tiled_mib = decoded.tiled >> 20,
-            bcpack_mib = decoded.bcpack >> 20,
-            format_mib = decoded.format >> 20,
-            depth_mib = decoded.depth >> 20,
-            layout_mib = decoded.layout >> 20,
-            multisampled_mib = decoded.multisampled >> 20,
-            alignment_mib = decoded.alignment >> 20,
-            other_mib = decoded.other >> 20,
+            decoded_mib = decoded.decoded >> 20,
+            tiled_mib = tiled,
+            bcpack_mib = bcpack,
+            bc_mipped_mib = bc_mipped,
+            format_mib = format,
+            depth_mib = depth,
+            layout_mib = layout,
+            multisampled_mib = multisampled,
+            alignment_mib = alignment,
+            other_mib = other,
             gpu_written_mib = decoded.written >> 20,
+            sampled_only_mib = decoded.sampled_only >> 20,
             in_place_mib = decoded.in_place >> 20,
             in_place_copies = decoded.in_place_copies,
             released_mib = released >> 20,
             released_faults = page_faults,
             released_misses = page_misses,
             released_writes = page_writes,
-            "texture copies: what is sampled from title memory, what the decoded copies are needed for (tiled swizzle, BCPack/BCn, format, depth, layout, multisampling, alignment, other), and how much could be decoded into the title's own pages in place"
+            "texture copies: what is sampled from title memory, what the decoded copies are needed for (one reason each: tiled swizzle, BCn one image, BCn mip chain, format, depth, layout, multisampling, alignment, other), and how much could be decoded into the title's own pages in place"
         );
     });
 }
