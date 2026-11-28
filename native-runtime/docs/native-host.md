@@ -3271,6 +3271,15 @@ traced run of 3 world frames, `VICTORY_TRACE_PASSES`, Series S, M5 Pro):
   `an_empty_index_buffer_view_clears_the_binding` and `an_empty_vertex_buffer_view_unbinds_the_slot`
   pin the input-assembler bindings. Without the size, both drawing tests fail: the second half of
   the buffer reads the pool's canary page.
+  `a_32_bit_index_buffer_across_title_pages_draws_its_triangle` draws the same triangle from
+  `R32_UINT` indices across the boundary; bound as 16-bit they would make a triangle with no area.
+- The one-byte fallback left in `NativeHost::prep` (a view size of `u32::MAX`, "none given") is
+  not reachable from a title (checked 28 November): only the sizeless `NativeList::set_vertex_buffer`
+  and `set_index_buffer`, which tests alone call, store it; `IASetVertexBuffers` and
+  `IASetIndexBuffer` pass the title's `SizeInBytes`, a size of 0 clears the binding, and
+  `ExecuteIndirect` signatures that set vertex or index buffers are dropped (`signature::command`).
+  A title view would reach it only by giving 0xFFFFFFFF bytes. Switching either index drawing test
+  to the sizeless setter makes it fail, so the fallback must stay out of title paths.
 - Still open: a heap buffer view with a real gap stays the null view and reads zeros (40 logged in
   that run, 13 KB to 130 KB, at title addresses of streamed data); a 64 KiB title page whose first
   byte is unmapped, or whose bytes are in two pools, is a null page in the page table, which every
