@@ -2929,6 +2929,30 @@ impl<B: GraphicsBackend> NativeHost<B> {
         out
     }
 
+    /// `VICTORY_TRACE_GPU_VERTICES`: `[start, end)` of every buffer unordered-access view (object or
+    /// placed) in the first `limit` entries of resource heap `h`: what a program that indexes the
+    /// heap itself may write through.
+    #[cfg(target_os = "macos")]
+    pub(super) fn heap_uav_ranges(&self, h: &NativeHeap<B>, limit: usize) -> Vec<(u64, u64)> {
+        use crate::descriptor::View;
+        if h.kind != HeapKind::Resource {
+            return Vec::new();
+        }
+        let resources = self.resources.borrow();
+        let step = Self::step(HeapKind::Resource);
+        let mut out = Vec::new();
+        for i in 0..h.count.min(limit) {
+            let Some(view) = crate::descriptor::view(h.start + i as u64 * step) else { continue };
+            if !matches!(&view, View::Unordered(..) | View::Placed(true, ..)) {
+                continue;
+            }
+            if let Some(Decoded::Buffer { addr, size }) = decode(&view, &resources) {
+                out.push((addr, addr.saturating_add(u64::from(size))));
+            }
+        }
+        out
+    }
+
     /// `VICTORY_TRACE_GPU_VERTICES`: the ranges of the buffer resources and of the host's own
     /// buffers, `[start, end)` by start (for sizing root views, which carry no size).
     #[cfg(target_os = "macos")]

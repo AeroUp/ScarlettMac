@@ -1111,7 +1111,10 @@ pub(crate) fn present(queue: This, planes: &[This]) {
     }
     #[cfg(target_os = "macos")]
     if super::gpu_vertex_trace::on() {
-        super::gpu_vertex_trace::present();
+        // Under the title's lock: no submission is being encoded, so every draw submitted so far
+        // is in a command buffer below the watermark.
+        let watermark = with_title(|_| victory_metal::gfx::committed_serial()).unwrap_or(u64::MAX);
+        super::gpu_vertex_trace::present(watermark, victory_metal::gfx::landed_before);
     }
     super::rt::present();
     dump_depth_targets();
@@ -2498,7 +2501,7 @@ fn dropped_dispatch(t: &MetalTitle, l: &mut MetalList, how: &str) {
     dropped("a dispatch without a host compute pipeline");
     drop_shaders(l.pipeline, true);
     #[cfg(target_os = "macos")]
-    trace_dropped_writes(t, l);
+    trace_dropped_writes(t, l, false);
     if pass_on() {
         pass_note(t, l, &format!("dispatch {how}"), "a dispatch without a host compute pipeline", true, 1);
     }
@@ -2519,12 +2522,33 @@ fn dropped_dispatch(t: &MetalTitle, l: &mut MetalList, how: &str) {
 }
 
 /// `VICTORY_TRACE_GPU_VERTICES`: what a dispatch dropped for want of a host compute pipeline
-/// may have written this frame, for the draws that read it (`gpu_vertex_trace`).
+/// (`threads`: a dispatch of thread counts) may have written this frame, for the draws that read
+/// it (`gpu_vertex_trace`), with why it was dropped and what its program may write.
 #[cfg(target_os = "macos")]
-fn trace_dropped_writes(t: &MetalTitle, l: &MetalList) {
-    if super::gpu_vertex_trace::on() {
-        super::gpu_vertex_trace::dropped_dispatch(&t.host, l.list.compute_args(), &stage_hashes(l.pipeline).join(" "));
+fn trace_dropped_writes(t: &MetalTitle, l: &MetalList, threads: bool) {
+    if !super::gpu_vertex_trace::on() {
+        return;
     }
+    let cs = crate::pipeline::native_stages(l.pipeline as This)
+        .and_then(|(stages, _)| stages.into_iter().find(|(s, _)| *s == "compute"))
+        .map(|(_, sh)| sh);
+    let why = match &cs {
+        None => "no compute shader",
+        Some(sh) => match (sh.native_state(), threads.then(|| sh.threads_state())) {
+            (Some(false), _) | (_, Some(Some(false))) => "refused",
+            (None, _) | (_, Some(None)) => "not translated yet",
+            _ => "no host pipeline yet",
+        },
+    };
+    let profile = cs.as_ref().and_then(|sh| sh.write_profile());
+    super::gpu_vertex_trace::dropped_dispatch(
+        &t.host,
+        l.list.compute_args(),
+        l.list.compute_heap(),
+        &stage_hashes(l.pipeline).join(" "),
+        why,
+        profile.as_deref(),
+    );
 }
 
 /// The stages of title pipeline `pipeline` with their shader hashes (for traces).
@@ -2626,7 +2650,7 @@ pub(crate) fn dispatch_threads(this: This, threads: [u32; 3]) {
                 dropped("a dispatch of thread counts without a host compute pipeline");
                 drop_shaders(l.pipeline, true);
                 #[cfg(target_os = "macos")]
-                trace_dropped_writes(t, l);
+                trace_dropped_writes(t, l, true);
                 if pass_on() {
                     pass_note(t, l, &format!("dispatch-threads{threads:?}"), "a dispatch of thread counts without a host compute pipeline", true, 1);
                 }

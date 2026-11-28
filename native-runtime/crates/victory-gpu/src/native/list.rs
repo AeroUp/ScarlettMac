@@ -995,6 +995,12 @@ impl<B: GraphicsBackend> NativeList<B> {
         self.state.compute.as_ref().and_then(|pso| pso.binding.as_ref())
     }
 
+    /// The resource heap the next dispatch takes (for traces).
+    #[cfg(target_os = "macos")]
+    pub(super) fn compute_heap(&self) -> Option<&NativeHeap<B>> {
+        self.state.heaps.0.as_deref()
+    }
+
     /// `Reset`: forget everything recorded and set.
     pub fn reset(&mut self) {
         *self = NativeList::default();

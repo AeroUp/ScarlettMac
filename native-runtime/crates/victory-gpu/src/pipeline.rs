@@ -92,6 +92,10 @@ pub(crate) struct Shader {
     /// except the one `prewarm-test` stage, so tests translate inline as before.
     #[cfg(target_os = "macos")]
     queued: std::sync::atomic::AtomicBool,
+    /// `VICTORY_TRACE_GPU_VERTICES`: what its compute program may write, read from the container
+    /// before it is let go (`native::gpu_vertex_trace::profile_of`; `None`: no compute program).
+    #[cfg(target_os = "macos")]
+    writes: std::sync::OnceLock<Option<Arc<crate::native::gpu_vertex_trace::WriteProfile>>>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -272,6 +276,8 @@ impl Shader {
             builder: std::sync::atomic::AtomicBool::new(crate::native::builder::named(bytes)),
             #[cfg(target_os = "macos")]
             queued: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            writes: std::sync::OnceLock::new(),
         }
     }
 
@@ -289,6 +295,11 @@ impl Shader {
                 {
                     let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{}_{}.bin", self.stage, self.hash)), &*container);
                 }
+                // `VICTORY_TRACE_GPU_VERTICES`: what a dispatch of it that is dropped may write.
+                #[cfg(target_os = "macos")]
+                if self.stage == "compute" && crate::native::gpu_vertex_trace::on() {
+                    let _ = self.writes.set(crate::native::gpu_vertex_trace::profile_of(&container).map(Arc::new));
+                }
                 // A vertex shader keeps its container (a rectangle-list draw translates it again),
                 // and a pixel shader its (integer colour targets do: the title may have freed it).
                 if self.stage != "vertex" && self.stage != "pixel" {
@@ -305,6 +316,23 @@ impl Shader {
 
 #[cfg(target_os = "macos")]
 impl Shader {
+    /// `VICTORY_TRACE_GPU_VERTICES`: what its compute program may write; read from the container
+    /// if the translation has not let it go yet (and no other thread holds it), else as the
+    /// translation noted it. `None`: not known.
+    pub(crate) fn write_profile(&self) -> Option<Arc<crate::native::gpu_vertex_trace::WriteProfile>> {
+        if let Some(p) = self.writes.get() {
+            return p.clone();
+        }
+        let container = self.container.try_lock().ok()?;
+        if container.is_empty() {
+            return None;
+        }
+        let p = crate::native::gpu_vertex_trace::profile_of(&container).map(Arc::new);
+        drop(container);
+        let _ = self.writes.set(p.clone());
+        p
+    }
+
     /// Whether the translation for the native host is made (or refused) already.
     pub(crate) fn native_ready(&self) -> bool {
         self.native.get().is_some()

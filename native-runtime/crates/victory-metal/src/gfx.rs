@@ -2230,6 +2230,18 @@ pub fn ended_submissions() -> u64 {
     ENDED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Command buffers given a serial so far: a watermark for [`landed_before`]. Taken while no
+/// submission is being encoded, every command buffer committed before it is below it.
+pub fn committed_serial() -> u64 {
+    SERIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether Metal has reported on every committed command buffer below serial `watermark`
+/// ([`committed_serial`]): what they wrote is in memory.
+pub fn landed_before(watermark: u64) -> bool {
+    flights().iter().all(|f| f.serial >= watermark)
+}
+
 fn flights() -> std::sync::MutexGuard<'static, std::collections::VecDeque<Flight>> {
     FLIGHTS.lock().unwrap_or_else(|e| e.into_inner())
 }
