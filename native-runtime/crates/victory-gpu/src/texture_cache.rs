@@ -12,7 +12,7 @@
 //! file per entry, written to a temporary name and renamed so a reader sees all of it or none, and
 //! each entry starts with the blake3 sum of the rest: an entry that is damaged or cut short is a
 //! miss and is detiled again. The key holds the format, the layout (`Desc` and pipe configuration)
-//! and the blake3 of the tiled bytes read from title memory — not the levels a decode happened to
+//! and the hash (`content_hash`) of the tiled bytes read from title memory — not the levels a decode happened to
 //! make — so identical bytes in the same layout are one entry wherever they came from (a file, a
 //! pool, another run, another texture) and a texture streamed in mip by mip adds to that entry
 //! instead of writing another copy. Entries carry the levels they hold, and a lookup takes the
@@ -42,6 +42,7 @@ use std::time::SystemTime;
 
 use victory_formats::texture::{Dimension, Layout};
 
+use crate::content_hash::ContentHash;
 use crate::mmap::Map;
 use crate::native::textures::{Level, Texels};
 
@@ -158,13 +159,13 @@ impl Cache {
     /// The decoded levels of a texture with `tiled`'s bytes in `layout`: the ones the caller still
     /// needs (`uploaded_mips` says which title mips the host texture already has, `skip` the top
     /// levels it was made without), or `None` when the entry is missing, damaged, or does not hold
-    /// every needed level. `hash` is blake3 of the whole tiled buffer.
+    /// every needed level. `hash` is the [`ContentHash`] of the whole tiled buffer.
     pub(crate) fn levels(
         &self,
         layout: &Layout,
         dimension: Dimension,
         format: u32,
-        hash: &blake3::Hash,
+        hash: &ContentHash,
         uploaded_mips: u32,
         skip: usize,
     ) -> Option<Vec<Level>> {
@@ -195,7 +196,7 @@ impl Cache {
         layout: &Layout,
         dimension: Dimension,
         format: u32,
-        hash: &blake3::Hash,
+        hash: &ContentHash,
         levels: &[Level],
     ) {
         if levels.is_empty() {
@@ -347,10 +348,10 @@ fn is_block_compressed(format: u32) -> bool {
     crate::resource::element(format).is_some_and(|(_, block)| block == 4)
 }
 
-/// The entry's key: what a decode depends on. `hash` is the tiled bytes' blake3 (the whole
+/// The entry's key: what a decode depends on. `hash` is the tiled bytes' [`ContentHash`] (the whole
 /// buffer, as the sync takes it), so any change to the source is another entry; the levels made
 /// are not part of it (an entry takes more of them as they are made).
-fn key(layout: &Layout, dimension: Dimension, format: u32, hash: &blake3::Hash) -> String {
+fn key(layout: &Layout, dimension: Dimension, format: u32, hash: &ContentHash) -> String {
     let mut h = blake3::Hasher::new();
     h.update(&DECODE_VERSION.to_le_bytes());
     h.update(&format.to_le_bytes());
@@ -438,7 +439,7 @@ pub(crate) fn levels(
     layout: &Layout,
     dimension: Dimension,
     format: u32,
-    hash: &blake3::Hash,
+    hash: &ContentHash,
     uploaded_mips: u32,
     skip: usize,
 ) -> Option<Vec<Level>> {
@@ -450,7 +451,7 @@ pub(crate) fn store(
     layout: &Layout,
     dimension: Dimension,
     format: u32,
-    hash: &blake3::Hash,
+    hash: &ContentHash,
     levels: &[Level],
 ) {
     if let Some(cache) = open() {
@@ -461,7 +462,7 @@ pub(crate) fn store(
 /// Whether an entry for exactly what the sync would key exists (tests: that the detile was kept).
 #[cfg(test)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn contains(layout: &Layout, dimension: Dimension, format: u32, hash: &blake3::Hash) -> bool {
+pub(crate) fn contains(layout: &Layout, dimension: Dimension, format: u32, hash: &ContentHash) -> bool {
     open().is_some_and(|c| c.path_for(&key(layout, dimension, format, hash)).is_file())
 }
 
@@ -506,7 +507,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path(), 0).unwrap();
         let (l, made) = (layout(), levels());
-        let hash = blake3::hash(b"tiled bytes");
+        let hash = ContentHash::of(b"tiled bytes");
         assert!(cache.levels(&l, Dimension::Tex2d, 71, &hash, 0, 0).is_none());
         cache.store(&l, Dimension::Tex2d, 71, &hash, &made);
         let back = cache.levels(&l, Dimension::Tex2d, 71, &hash, 0, 0).expect("stored");
@@ -519,7 +520,7 @@ mod tests {
         assert_eq!(cache.levels(&l, Dimension::Tex2d, 71, &hash, 1, 0).unwrap().len(), 1);
         // Another format, another layout, other bytes: other entries.
         assert!(cache.levels(&l, Dimension::Tex2d, 28, &hash, 0, 0).is_none());
-        assert!(cache.levels(&l, Dimension::Tex2d, 71, &blake3::hash(b"other"), 0, 0).is_none());
+        assert!(cache.levels(&l, Dimension::Tex2d, 71, &ContentHash::of(b"other"), 0, 0).is_none());
         // Damaged (a byte changed): a miss.
         let path = walk(dir.path()).into_iter().map(|(p, ..)| p).next().expect("an entry");
         let mut bytes = std::fs::read(&path).unwrap();
@@ -536,7 +537,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::open(dir.path(), 0).unwrap();
         let (l, made) = (layout(), levels());
-        let hash = blake3::hash(b"tiled bytes");
+        let hash = ContentHash::of(b"tiled bytes");
         cache.store(&l, Dimension::Tex2d, 71, &hash, &made[..1]);
         cache.store(&l, Dimension::Tex2d, 71, &hash, &made[1..]);
         assert_eq!(walk(dir.path()).len(), 1, "one file for one content and layout");
@@ -583,7 +584,7 @@ mod tests {
         // Three entries of about the same size, the first used longest ago.
         let mut sizes = Vec::new();
         for n in 0..3u8 {
-            let hash = blake3::hash(&[n]);
+            let hash = ContentHash::of(&[n]);
             let cache = Cache::open(dir.path(), 0).unwrap();
             cache.store(&l, Dimension::Tex2d, 71, &hash, &made);
             let files = walk(dir.path());

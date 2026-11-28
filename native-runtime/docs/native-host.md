@@ -1188,6 +1188,11 @@ Why the wired memory flips (#79, 48 GB M5 Pro, `VICTORY_METAL_REQUEST_RESIDENCY=
 * Measured on warm runs with `VICTORY_HOLD_BYTE` on the init watchdog's flag: world frames presented from 30 to 150 s after the world starts (its first indirect rectangle-list draw). 0.38 a second before (46 frames), 1.17 with the reads off the lock (140), 1.73 with the whole-check rule and the scanner's baseline as well (208; that build also has main's G-buffer and upscale fixes). A second of world in the last one's trace: 45 submissions read 1,670 textures and 840 MiB (290 for the first time, 680 unchanged, 780 with memory that could not be read at once) in 0.41 s without the lock (the reading threads: 0.5 s reading, 0.44 s hashing, 0.24 s detiling); under the lock, 28 ms probing the hot textures (18,900 of them at most), 81 ms probing the blank ones, 94 ms uploading. Whole checks: 790 and 410 MiB a second, 1,630 and 330 MiB before the rule (17 and 9 MiB a submission, 44 and 9 MiB before). `WHOLE_BUDGET` bounds both: the rule halved their number, not their bytes, and what is still read at every probe are textures whose last write their samples did not show.
 * `victory_formats::texture::Layout::walk` precomputes column block offsets and low-bit contiguous micro-runs (`1` to `32` bytes) for XOR swizzle modes (`_X`, `_T`) and hoists the per-slice and per-row address/XOR terms out of the inner column loop, cutting a `2048x2048` `SW_64KB_S_X` detile to ~1.3 ms at 4 B/element and ~5.6 ms at 16 B/element (`texture::xor_tests::walk_matches_per_element_xor_address_across_modes`, `texture::xor_tests::partial_xor_runs_with_pipe_bank_xor_round_trip_every_element_size`).
 * The suspect that two descriptions placed at one address release each other in turn ("Placed textures are released" below): the trace counts the placements that replace another at their address, and those of them that had been at that address before. In 260 s of world, 32,291 were replaced and 5,715 of them (18%) were returns, against 62,656 first uploads. It happens, but it is under a tenth of the first uploads and not what makes the world slow.
+* **The hash is XXH3-128 (29 November).** Telling texture memory apart (sync, scanner, probes,
+  the cache's key: `content_hash`) used blake3, 2.2 GB/s a thread under Rosetta, against about 30
+  for XXH3 (SSE2). A collision would only leave one texture stale until its next write.
+  `VICTORY_TEXTURE_HASH=blake3` brings blake3 back for an A/B run. Tests:
+  `texture_memory_hashes_with_xxh3_unless_blake3_is_asked_for`, `a_hash_in_pieces_is_the_hash_of_the_whole`.
 * Still open: whole checks of textures whose writes the samples miss fill `WHOLE_BUDGET` at every submission and mostly find nothing (the scanner reads the same textures on its own thread); nearly half the textures read have memory that cannot be read at once and are read page by page; the submitting thread waits for its reads; the probes are budgets a submission (2 ms for the hot textures, 2 ms for the blank ones, at least 32 of each), which at 30 submissions a frame is over 100 ms a frame; hot textures cool one probe at a time, so thousands stay hot for minutes; `mach_vm_read_overwrite` on 6 threads reads about twice as fast as on one, not six times.
 
 #### Text drawn as boxes: blend from the 0x1c8 register image (resolved)
@@ -3102,7 +3107,7 @@ passes by GPU time` line with the ten encoders that held the GPU longest:
   unchanged), MiB, and the probe, prepare, upload, read, hash and detile times — the same figures
   `VICTORY_TRACE_TEXTURE_SYNC` prints once a second, summed per frame here. `tex_deferred` counts
   submissions whose textures were left for the next frame because the frame's 3 s of texture work
-  was spent (`textures::FRAME_TEXTURE_WORK`; below).
+  was spent (`textures::FRAME_TEXTURE_WORK`; below). `scan_mb`, `scan_read_ms`, `scan_hash_ms` are the scanner thread's rounds in the window.
 - `put_off` pipelines were put off for a later frame, `pipes` were asked of the backend (of which
   `pipes_made` Metal compiled now) taking `pipes_ms` on the title's threads.
 

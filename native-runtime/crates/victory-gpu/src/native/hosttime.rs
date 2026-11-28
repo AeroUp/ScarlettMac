@@ -78,6 +78,11 @@ struct Counters {
     sync_hash_us: AtomicU64,
     sync_detile_us: AtomicU64,
     sync_probe_us: AtomicU64,
+    /// The scanner's thread (`textures::scan_round`): bytes of texture memory it read and hashed,
+    /// and the time each took.
+    scan_bytes: AtomicU64,
+    scan_read_us: AtomicU64,
+    scan_hash_us: AtomicU64,
 }
 
 static C: Counters = Counters {
@@ -110,6 +115,9 @@ static C: Counters = Counters {
     sync_hash_us: AtomicU64::new(0),
     sync_detile_us: AtomicU64::new(0),
     sync_probe_us: AtomicU64::new(0),
+    scan_bytes: AtomicU64::new(0),
+    scan_read_us: AtomicU64::new(0),
+    scan_hash_us: AtomicU64::new(0),
 };
 
 fn add(c: &AtomicU64, n: u64) {
@@ -341,6 +349,15 @@ pub(crate) fn textures(
     }
 }
 
+/// What a scanner round read and hashed (its thread's time, not a submission's).
+pub(crate) fn scanned(bytes: u64, read: Duration, hash: Duration) {
+    if enabled() {
+        add(&C.scan_bytes, bytes);
+        add(&C.scan_read_us, us(read));
+        add(&C.scan_hash_us, us(hash));
+    }
+}
+
 /// What has accumulated since the last present.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct Taken {
@@ -373,6 +390,9 @@ pub struct Taken {
     pub sync_read_us: u64,
     pub sync_hash_us: u64,
     pub sync_detile_us: u64,
+    pub scan_bytes: u64,
+    pub scan_read_us: u64,
+    pub scan_hash_us: u64,
 }
 
 fn take(c: &AtomicU64) -> u64 {
@@ -411,6 +431,9 @@ pub fn take_window() -> Taken {
         sync_read_us: take(&C.sync_read_us),
         sync_hash_us: take(&C.sync_hash_us),
         sync_detile_us: take(&C.sync_detile_us),
+        scan_bytes: take(&C.scan_bytes),
+        scan_read_us: take(&C.scan_read_us),
+        scan_hash_us: take(&C.scan_hash_us),
     }
 }
 

@@ -3730,7 +3730,7 @@ fn a_decoded_texture_is_kept_under_the_bytes_it_came_from() {
     t.texture_created(key, info.clone());
     assert!(t.realize(key), "a view names it");
     t.sync_textures();
-    let hash = blake3::hash(&pool.read::<u8>(0, size));
+    let hash = crate::content_hash::ContentHash::of(&pool.read::<u8>(0, size));
     assert!(
         crate::texture_cache::contains(&layout, info.dimension, info.format, &hash),
         "the detile was kept under the bytes it came from"

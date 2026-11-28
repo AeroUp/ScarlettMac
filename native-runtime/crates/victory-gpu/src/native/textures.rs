@@ -23,6 +23,7 @@ use super::host::NativeHost;
 use super::memory::PoolTable;
 use super::list::NativeList;
 use super::title::Title;
+use crate::content_hash::ContentHash;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -726,7 +727,7 @@ struct Watch {
     /// What a submission read, the host texture holds: the scanner does not report it again (it
     /// used to report every new texture and every write a probe had caught already, and each
     /// report is the whole texture read once more).
-    seen: HashMap<usize, blake3::Hash>,
+    seen: HashMap<usize, ContentHash>,
     /// Textures whose last whole read met an unmapped or protected range (fine mips not mapped yet).
     partial: std::collections::HashSet<usize>,
     /// Bumped whenever a submission begins or applies a whole read of a watched texture, so an
@@ -790,14 +791,24 @@ fn scan_round(watched: &Watched, buf: &mut [u8]) {
         }) else {
             continue;
         };
-        let mut h = blake3::Hasher::new();
+        let mut h = crate::content_hash::Hasher::new();
         let mut unreadable = false;
+        // `VICTORY_TRACE_FRAME`: the round's read and hash time (two clock reads a MiB).
+        let (mut read, mut hashed) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         for off in (0..size).step_by(buf.len()) {
             let n = buf.len().min(size - off);
+            let started = std::time::Instant::now();
             unreadable |= !read_bytes(pool.as_deref(), at + off, &mut buf[..n], was_partial);
+            let between = std::time::Instant::now();
             h.update(&buf[..n]);
+            read += between - started;
+            hashed += between.elapsed();
         }
         let h = h.finalize();
+        #[cfg(target_os = "macos")]
+        super::hosttime::scanned(size as u64, read, hashed);
+        #[cfg(not(target_os = "macos"))]
+        let _ = (read, hashed);
         watch_in(watched, |w| {
             // Released, or begun/applied by a submission while it was hashed here: this reading is
             // the older one, and the next round compares with the submission's.
@@ -837,7 +848,7 @@ pub struct Tracked<B: ResourceBackend> {
     /// Which texture this is: its key (an object's address, a placement) names another one later.
     serial: u64,
     /// The hash of the memory last uploaded; `None` for targets and before the first upload.
-    last: Option<blake3::Hash>,
+    last: Option<ContentHash>,
     /// Uploads of its memory so far.
     pub uploads: u64,
     /// Bitmask of mip levels (`mip < 32`) uploaded with non-zero texels (or `u32::MAX` for targets
@@ -848,7 +859,7 @@ pub struct Tracked<B: ResourceBackend> {
     /// rather than left to the scanner (0: cold), and the hash of its samples when it was last
     /// read whole (a probe that reads others reports a write).
     hot_until: u64,
-    probe: Option<blake3::Hash>,
+    probe: Option<ContentHash>,
     /// Whether its last write showed in the sampled probe (a movie's planes, a streamed texture:
     /// written whole): then it is read whole only every `WHOLE_EVERY` probes (backing off across
     /// consecutive unchanged whole checks), and probes skipped since. Set at each upload
@@ -1026,8 +1037,8 @@ fn probe_hash(
     whole: bool,
     known_partial: bool,
     scratch: &mut Vec<u8>,
-) -> blake3::Hash {
-    let mut hasher = blake3::Hasher::new();
+) -> ContentHash {
+    let mut hasher = crate::content_hash::Hasher::new();
     probe_read(memory, at, size, layout, whole, known_partial, scratch, |b| {
         hasher.update(b);
     });
@@ -1396,7 +1407,7 @@ impl<B: PresentBackend> Title<B> {
         let _ = read_into(Some(&pools), info.memory as usize, &mut tiled, t.partial);
         // The title wrote the memory since the host texture was filled from it: its bytes stay,
         // and the next submission uploads them.
-        if t.last != Some(blake3::hash(&tiled)) {
+        if t.last != Some(ContentHash::of(&tiled)) {
             return;
         }
         if let Err(error) = download(&self.host.backend, &t.texture, info, &mut tiled) {
@@ -1405,7 +1416,7 @@ impl<B: PresentBackend> Title<B> {
             }
             return;
         }
-        let hash = blake3::hash(&tiled);
+        let hash = ContentHash::of(&tiled);
         if t.last == Some(hash) {
             return;
         }
@@ -2988,7 +2999,7 @@ pub(super) struct Job {
     dimension: Dimension,
     layout: Layout,
     /// The hash of what the host texture holds: memory that still hashes to it is not detiled.
-    last: Option<blake3::Hash>,
+    last: Option<ContentHash>,
     uploaded_mips: u32,
     /// Whether an earlier whole read met an unmapped or protected range.
     partial: bool,
@@ -3003,9 +3014,9 @@ struct Ready {
     key: usize,
     serial: u64,
     bytes: usize,
-    hash: blake3::Hash,
+    hash: ContentHash,
     /// What a sampled probe of that memory hashes to ([`probe_hash`]).
-    probe: blake3::Hash,
+    probe: ContentHash,
     /// Some of it could not be read (and counts as zeros).
     unreadable: bool,
     /// All zeros.
@@ -3073,7 +3084,7 @@ impl Job {
         let tiled = &mut tiled[..self.size];
         let unreadable = read_into(Some(&self.pools), self.memory, tiled, self.partial);
         let read = started.elapsed();
-        let hash = blake3::hash(tiled);
+        let hash = ContentHash::of(tiled);
         let hashed = started.elapsed();
         let changed = self.last != Some(hash);
         let addressable = self.layout.addressable();
@@ -3788,9 +3799,8 @@ impl<B: PresentBackend> Title<B> {
         }
         // SAFETY: `resolve` gave `size` mapped, writable bytes of the pool; the buffer is kept.
         unsafe { std::ptr::copy_nonoverlapping(tiled.as_ptr(), at.cast_mut(), tiled.len()) };
-        let hash = blake3::hash(&tiled);
         if let Some(t) = self.textures.get_mut(&key) {
-            t.last = Some(hash);
+            t.last = Some(ContentHash::of(&tiled));
             // The title read or wrote those pages: they are its own now, and are not given back
             // again (a copy it reads back every frame must not fault every frame).
             t.streamed = false;
@@ -4728,7 +4738,7 @@ mod tests {
         watch_in(watched, |w| std::mem::take(&mut w.dirty))
     }
 
-    fn seen(watched: &Watched) -> HashMap<usize, blake3::Hash> {
+    fn seen(watched: &Watched) -> HashMap<usize, ContentHash> {
         watch_in(watched, |w| w.seen.clone())
     }
 
@@ -4743,7 +4753,7 @@ mod tests {
 
         watch_in(&w, |w| w.entries.remove(&1));
         assert!(dirty_this_round(&w).is_empty());
-        assert_eq!(seen(&w), HashMap::from([(2, blake3::hash(&bytes))]));
+        assert_eq!(seen(&w), HashMap::from([(2, ContentHash::of(&bytes))]));
 
         watch_in(&w, |w| w.entries.insert(1, entry));
         assert_eq!(dirty_this_round(&w), [1].into());
@@ -4754,11 +4764,11 @@ mod tests {
         let mut bytes = [3u8];
         let w = watched([(1, (bytes.as_ptr() as usize, bytes.len(), true, 0))]);
         assert!(dirty_this_round(&w).is_empty());
-        assert_eq!(seen(&w)[&1], blake3::hash(&bytes));
+        assert_eq!(seen(&w)[&1], ContentHash::of(&bytes));
 
         bytes[0] = 4;
         assert_eq!(dirty_this_round(&w), [1].into());
-        assert_eq!(seen(&w)[&1], blake3::hash(&bytes));
+        assert_eq!(seen(&w)[&1], ContentHash::of(&bytes));
     }
 
     /// What a submission read whole is what the scanner compares with: it reports the write after
@@ -4770,7 +4780,7 @@ mod tests {
         assert_eq!(dirty_this_round(&w), [1].into());
         bytes[0] = 4;
         // A submission read it meanwhile (`sync_apply`).
-        watch_in(&w, |w| w.seen.insert(1, blake3::hash(&bytes)));
+        watch_in(&w, |w| w.seen.insert(1, ContentHash::of(&bytes)));
         assert!(dirty_this_round(&w).is_empty());
         bytes[0] = 5;
         assert_eq!(dirty_this_round(&w), [1].into());
@@ -4786,7 +4796,7 @@ mod tests {
         let (old, new) = (entry(0), entry(1));
         let w = watched([(1, old)]);
         assert!(dirty_this_round(&w).is_empty());
-        assert_eq!(seen(&w)[&1], blake3::hash(&bytes));
+        assert_eq!(seen(&w)[&1], ContentHash::of(&bytes));
 
         // Released and made again between two rounds, its memory holding something else by then.
         watch_in(&w, |w| {
@@ -4795,7 +4805,7 @@ mod tests {
         });
         bytes[0] = 6;
         assert!(dirty_this_round(&w).is_empty(), "the new texture's first sight is not a change");
-        assert_eq!(seen(&w)[&1], blake3::hash(&bytes));
+        assert_eq!(seen(&w)[&1], ContentHash::of(&bytes));
         bytes[0] = 7;
         assert_eq!(dirty_this_round(&w), [1].into(), "a write into it after that is");
     }
@@ -4962,7 +4972,7 @@ mod tests {
         let mut scratch = vec![0xff; expected.len()];
         assert_eq!(
             probe_hash(None, start as usize, expected.len(), None, true, false, &mut scratch),
-            blake3::hash(&expected)
+            ContentHash::of(&expected)
         );
     }
 
@@ -5231,7 +5241,7 @@ mod tests {
             restreamed: false,
             last_used_at: std::time::Instant::now(),
             serial: 1,
-            last: Some(blake3::hash(&mem)),
+            last: Some(ContentHash::of(&mem)),
             uploads: 2,
             uploaded_mips: u32::MAX,
             hot_until,

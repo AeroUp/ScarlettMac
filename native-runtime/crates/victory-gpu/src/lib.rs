@@ -33,6 +33,8 @@ mod compute;
 pub mod console;
 /// Decoded textures kept on disk (`nat`): the texture side of `shader_cache`.
 pub mod texture_cache;
+/// The hash title texture memory is compared and keyed by (XXH3, or blake3 when asked for).
+pub mod content_hash;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;
 pub mod descriptor;
