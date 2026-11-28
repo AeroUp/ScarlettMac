@@ -10,6 +10,7 @@ use crate::native::state::Graphics;
 use crate::native::title::{Pipe, Title};
 use std::rc::Rc;
 use victory_backend::resources::*;
+use victory_formats::texture::Swizzle;
 use victory_metal::metal::Metal;
 use victory_shader::emit::HostShader;
 use victory_shader::native::HwStage;
@@ -27,6 +28,8 @@ fn translate(stage: HwStage, words: &[u32]) -> HostShader {
 /// test's own view.
 struct Heap {
     heap: Rc<NativeHeap<Metal>>,
+    /// The red and green textures' resource objects.
+    keys: [usize; 2],
     _records: Vec<u32>,
 }
 
@@ -35,11 +38,13 @@ impl Heap {
         let records = vec![0u32; 8 * 3];
         let start = records.as_ptr() as u64;
         let heap = t.host.heap(HeapKind::Resource, start, 3).unwrap();
+        let mut keys = [0; 2];
         for (i, texel) in [[255, 0, 0, 255], [0, 255, 0, 255]].into_iter().enumerate() {
             let tex = t.host.texture(&TextureDesc::d2(Format::Rgba8Unorm, 1, 1)).unwrap();
             t.host.backend.upload_texture(&tex, 0, 0, &texel, 4, 0);
-            let key = 0x4EA9_0000 + i;
+            let key = texture_object((1, 1), 0);
             t.host.register_texture(key, &tex);
+            keys[i] = key;
             // DXGI_FORMAT_R8G8B8A8_UNORM, TEXTURE2D, one mip.
             let mut srv = [0u32; 10];
             (srv[0], srv[1], srv[5]) = (28, 4, 1);
@@ -47,8 +52,20 @@ impl Heap {
             crate::descriptor::create_srv(std::ptr::null(), key as _, &srv, slot);
             assert!(t.host.mirror(slot).unwrap());
         }
-        Heap { heap, _records: records }
+        Heap { heap, keys, _records: records }
     }
+}
+
+/// A linear RGBA8 texture's resource object (`flags` as the title's description has them), for a
+/// view's resource: the host reads each view's resource as a real object (a texture view's
+/// descriptor words, `descriptor::texture_words`), so a made-up key would be dereferenced. Its
+/// texels are those of the host texture a test registers for it, not read from its memory.
+fn texture_object(size: (u64, u32), flags: u32) -> usize {
+    // Memory for the objects to stand at, kept for the run: they are never released.
+    static MEMORY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let memory =
+        *MEMORY.get_or_init(|| Box::leak(vec![0u8; 0x1_0000].into_boxed_slice()).as_ptr().addr());
+    crate::resource::test_texture_at(memory as u64, size, 1, 28, Swizzle::LINEAR.0, flags) as usize
 }
 
 /// Draws `vs` and `ps` as a guessed pipeline into an 8x8 RGBA8 target cleared to black, with the
@@ -265,7 +282,7 @@ fn a_mesh_shader_loads_a_texture_by_heap_index() {
 fn a_released_texture_leaves_the_heap() {
     let Some(t) = title() else { return };
     let heap = Heap::new(&t);
-    let (red, green) = (0x4EA9_0000, 0x4EA9_0001);
+    let [red, green] = heap.keys;
     t.host.forget_resource(red);
     assert_eq!(t.host.cleared(), 0, "forgetting a texture leaves its entries");
     t.host.register_texture(red, &t.host.texture(&TextureDesc::d2(Format::Rgba8Unorm, 1, 1)).unwrap());
@@ -784,7 +801,8 @@ fn a_size_query_of_a_writable_image_reads_its_size() {
     let mut desc = TextureDesc::d2(Format::Rgba8Unorm, 16, 8);
     desc.unordered_access = true;
     let tex = t.host.texture(&desc).unwrap();
-    let key = 0x4EA9_0100;
+    // Flag 4: ALLOW_UNORDERED_ACCESS.
+    let key = texture_object((16, 8), 4);
     t.host.register_texture(key, &tex);
     // DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_UAV_DIMENSION_TEXTURE2D, mip 0.
     let mut uav_desc = [0u32; 10];

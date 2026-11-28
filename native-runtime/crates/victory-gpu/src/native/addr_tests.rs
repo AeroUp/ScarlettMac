@@ -1514,7 +1514,9 @@ fn a_descriptor_with_its_stride_cleared_reads_the_view_raw_on_the_gpu() {
     let records = vec![0u32; 8 * 2];
     let start = records.as_ptr() as u64;
     let heap = t.host.heap(HeapKind::Resource, start, 2).unwrap();
-    let (rs, rd) = (0x57D_0001usize, 0x57D_0002usize);
+    // Real resource objects: the host reads each view's resource as one.
+    let rs = crate::resource::test_buffer_at(VA_A + 0x1000, 4096) as usize;
+    let rd = crate::resource::test_buffer_at(VA_A + 0x2000, 4096) as usize;
     t.host.register_buffer(rs, VA_A + 0x1000, 4096);
     t.host.register_buffer(rd, VA_A + 0x2000, 4096);
     let mut srv = [0u32; 10];

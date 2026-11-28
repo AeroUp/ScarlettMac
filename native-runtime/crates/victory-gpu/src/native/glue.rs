@@ -2404,6 +2404,9 @@ pub(crate) fn install_test_render_pipeline(
 ) {
     with_title(|t| {
         t.pipelines.insert((key, 0), Pipe::Render(pso, None));
+        // No stage-in streams (stream signature 0, the key above): `key` is no pipeline object
+        // for `stream_signature` to read its input layout from.
+        t.pipeline_streams.insert(key, Vec::new());
     });
 }
 
