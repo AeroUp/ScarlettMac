@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="144" viewBox="0 0 720 144" role="img" aria-labelledby="title description">
+  <title id="title">Native Series S progress</title>
+  <desc id="description">Four of ten equally weighted milestones are demonstrated, an estimated 40 percent.</desc>
+  <rect width="720" height="144" rx="14" fill="#111a29"/>
+  <g font-family="system-ui,sans-serif">
+    <text x="28" y="42" fill="#f2f5f9" font-size="22" font-weight="700">Native Series S milestones</text>
+    <text x="692" y="42" text-anchor="end" fill="#7ce3c7" font-size="22" font-weight="700">40% estimated</text>
+    <rect x="28" y="65" width="664" height="18" rx="9" fill="#31435c"/>
+    <rect x="28" y="65" width="266" height="18" rx="9" fill="#7ce3c7"/>
+    <text x="28" y="115" fill="#b8c7d9" font-size="16">4 of 10 milestones demonstrated · November 28, 2026</text>
+  </g>
+</svg>

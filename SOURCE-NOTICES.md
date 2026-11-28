@@ -9,3 +9,5 @@ The BCPack test vectors are synthetic and can be reproduced with the generator i
 The optional Lanes patch contains changes to XCL only. TuxBox Lanes is independently available under the Apache License 2.0. [TuxBox license](https://github.com/brcly/TuxBox/blob/3086e0b0451aafb7d74dac44b1ebf7786bea06d4/LICENSE)
 
 The standalone VIctory-macOS runtime preview carries its own GPL-3.0-or-later license and upstream notices. [Runtime source provenance](runtime-preview/SOURCE-NOTICES.md)
+
+The standalone [native runtime](native-runtime/) is a source snapshot of the local Native VIctory development branch at `73e75045b2b26279bdeb1af34094262721f1500b`. It builds on [Native VIctory for macOS](https://github.com/LakshanSivakumar/Native-Victory-macOS), [VIctory](https://github.com/Marvisak/VIctory), and [VIctory for macOS](https://github.com/pragyaangaur/VIctory-macOS). The snapshot retains their source notices and [GPL-3.0 license](native-runtime/LICENSE). It includes scoped Git policy changes for the fork layout and excludes local build outputs, caches, game captures, and developer automation.

@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""Compile the original shaders with the GDK's Scarlett dxc and probe the result.
+
+On Windows:
+
+    python tools/shader-diff/make_fixtures.py.txt \
+        --dxc "C:/Program Files (x86)/Microsoft GDK/<version>/GXDK/bin/Scarlett/dxc.exe" \
+        --out "%TEMP%/victory-shader-diff"
+
+On macOS through Wine (the GDK's tools are Windows PE):
+
+    python tools/shader-diff/make_fixtures.py.txt \
+        --wine /Users/<you>/Documents/ScarlettMac/.toolchain/wine-cx/bin/wine \
+        --dxc "<GDK>/GXDK/bin/Scarlett/dxc.exe" \
+        --out "$TMPDIR/victory-shader-diff"
+
+The script copies dxc.exe and its three DLLs into the scratch directory, copies
+the original HLSL there, and runs dxc from that directory with relative paths.
+A new WINEPREFIX is made there; WINEDEBUG and WINEDLLOVERRIDES are set for the
+Wine run. Each shader has an embedded RootSignature so the Scarlett compiler
+precompiles native code.
+
+For each shader it compiles:
+
+  * the Scarlett form (the GDK's precompiled native code in a DXBC container),
+  * a PC reference with precompilation disabled (the same dxc and
+    -D__XBOX_DISABLE_PRECOMPILE=1),
+
+then copies both into a corpus outside the repository and runs
+
+    cargo xtask shader <hash> --corpus <dir> --probe
+    cargo xtask shader <hash> --corpus <dir> --dxil <dir>
+
+The probe reports part sizes, the DXIL program header, every XDAT offset and
+the native reader's verdict; it never prints shader bytes. The summary here
+says whether the Scarlett output has XDAT at the reader's +0x18, whether the
+reader found a native program of the expected stage, and whether translation
+succeeded. A PC reference that also has native code means the disable define
+did not take.
+
+No SDK file is copied into the repository; --out must be outside it.
+"""
+
+import argparse
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SHADERS = [
+    {"name": "cmp_depth_ps", "profile": "ps_6_6", "stage": "ps"},
+    {"name": "cmp_gather_cs", "profile": "cs_6_6", "stage": "cs"},
+    {"name": "depth_resource_cs", "profile": "cs_6_6", "stage": "cs"},
+]
+
+# The files dxc.exe loads beside itself; xg_xs.dll is not needed for compiling.
+TOOL_FILES = ["dxc.exe", "dxcompiler_xs.dll", "xbsc_xs.dll", "newbe_xs.dll"]
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def under(path, root):
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def run(cmd, cwd=None, env=None, verbose=False):
+    if verbose:
+        print("+", " ".join(str(c) for c in cmd))
+    return subprocess.run(
+        [str(c) for c in cmd],
+        cwd=str(cwd) if cwd else None,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
+
+
+def wine_environment(args, out):
+    if not args.wine:
+        return None
+    prefix = Path(args.wineprefix).expanduser() if args.wineprefix else out / "wineprefix"
+    prefix.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["WINEPREFIX"] = str(prefix)
+    env["WINEDEBUG"] = "-all"
+    env["WINEDLLOVERRIDES"] = "winemac.drv=d;mscoree,mshtml="
+    return env
+
+
+def prepare_tools(dxc, out):
+    source = Path(dxc).expanduser()
+    if not source.is_file():
+        raise SystemExit("dxc not found: " + str(source))
+    tools = out / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    for name in TOOL_FILES:
+        src = source.parent / name
+        if not src.is_file():
+            raise SystemExit("missing beside dxc: " + str(src))
+        dst = tools / name
+        if src.resolve() != dst.resolve():
+            shutil.copy2(src, dst)
+    return tools
+
+
+def dxc_command(args, out):
+    # A scratch cwd and relative paths, as Wine is most reliable with those.
+    dxc = "./tools/dxc.exe" if args.wine else str(Path("tools") / "dxc.exe")
+    return ([args.wine, dxc] if args.wine else [dxc])
+
+
+def compile_args(dxc, src, out_file, profile, xbox):
+    command = list(dxc) + ["-T", profile, "-E", "main", "-Fo", out_file, "-Qstrip_reflect"]
+    if xbox:
+        command += [
+            "-D_GAMING_XBOX",
+            "-D_GAMING_XBOX_SCARLETT",
+            "-DWINAPI_FAMILY=WINAPI_FAMILY_GAMES",
+        ]
+    else:
+        command += ["-D__XBOX_DISABLE_PRECOMPILE=1"]
+    command.append(src)
+    return command
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dxc", required=True, help="GDK Scarlett dxc.exe")
+    ap.add_argument("--wine", help="run dxc through this Wine (macOS/Linux)")
+    ap.add_argument("--wineprefix", help="WINEPREFIX (default: <out>/wineprefix)")
+    ap.add_argument("--out", required=True, help="scratch directory outside the repository")
+    ap.add_argument("--cargo", default="cargo")
+    ap.add_argument("--skip-pc", action="store_true", help="do not build the PC reference")
+    ap.add_argument("--only", help="comma-separated shader names")
+    ap.add_argument("--dry-run", action="store_true", help="print the commands only")
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    out = Path(args.out).expanduser()
+    if under(out, REPO):
+        raise SystemExit("--out must be outside the repository: " + str(out))
+    if not args.dry_run and args.wine and not Path(args.wine).is_file():
+        raise SystemExit("wine not found: " + args.wine)
+    if not args.dry_run and not Path(args.dxc).expanduser().is_file():
+        raise SystemExit("dxc not found: " + args.dxc)
+
+    names = {n.strip() for n in args.only.split(",")} if args.only else None
+    shaders = [s for s in SHADERS if not names or s["name"] in names]
+    if not shaders:
+        raise SystemExit("--only names no shader")
+
+    compiled = out / "compiled"
+    shaders_dir = out / "shaders"
+    corpus = out / "corpus"
+    dxil = out / "dxil"
+    report_path = out / "report.txt"
+    if not args.dry_run:
+        for d in (compiled, shaders_dir, corpus, dxil):
+            d.mkdir(parents=True, exist_ok=True)
+        prepare_tools(args.dxc, out)
+        env = wine_environment(args, out)
+        dxc = dxc_command(args, out)
+    else:
+        env = None
+        dxc = [args.wine, "./tools/dxc.exe"] if args.wine else [str(Path("tools") / "dxc.exe")]
+    report = []
+
+    if not args.dry_run:
+        version = run(dxc + ["--version"], cwd=out, env=env, verbose=args.verbose)
+        first = (version.stdout or version.stderr).strip().splitlines()
+        print("dxc: " + (first[0] if first else "no version output"))
+        report.append("dxc: " + (version.stdout + version.stderr).strip())
+
+    failures = 0
+    for s in shaders:
+        src = REPO / "tools" / "shader-diff" / "shaders" / (s["name"] + ".hlsl")
+        src_rel = str(Path("shaders") / (s["name"] + ".hlsl"))
+        xbox_rel = str(Path("compiled") / (s["name"] + ".xbox.cso"))
+        pc_rel = str(Path("compiled") / (s["name"] + ".pc.cso"))
+        xbox_cmd = compile_args(dxc, src_rel, xbox_rel, s["profile"], True)
+        pc_cmd = compile_args(dxc, src_rel, pc_rel, s["profile"], False)
+
+        if args.dry_run:
+            print("+", " ".join(str(c) for c in xbox_cmd))
+            if not args.skip_pc:
+                print("+", " ".join(str(c) for c in pc_cmd))
+            continue
+
+        shutil.copyfile(src, shaders_dir / (s["name"] + ".hlsl"))
+        xbox = run(xbox_cmd, cwd=out, env=env, verbose=args.verbose)
+        if xbox.returncode != 0:
+            failures += 1
+            print(f"{s['stage']} {s['name']} (xbox): compile failed")
+            report.append(f"== {s['name']} (xbox) compile failed\n{xbox.stdout}\n{xbox.stderr}")
+            continue
+
+        pc_ready = False
+        if not args.skip_pc:
+            pc = run(pc_cmd, cwd=out, env=env, verbose=args.verbose)
+            if pc.returncode != 0:
+                print(f"{s['stage']} {s['name']} (pc): reference compile failed (ignored)")
+                report.append(f"== {s['name']} (pc) compile failed\n{pc.stdout}\n{pc.stderr}")
+            else:
+                pc_ready = True
+
+        xbox_cso = out / xbox_rel
+        xbox_bytes = xbox_cso.read_bytes()
+        hash16 = hashlib.sha256(xbox_bytes).hexdigest()[:16]
+        corpus_name = f"{s['stage']}_{hash16}.bin"
+        shutil.copyfile(xbox_cso, corpus / corpus_name)
+        report.append(f"== {s['name']} xbox -> {corpus_name}")
+
+        probe = run(
+            [args.cargo, "run", "--release", "-p", "xtask", "--",
+             "shader", hash16, "--corpus", corpus, "--probe"],
+            cwd=REPO, verbose=args.verbose,
+        )
+        report.append(probe.stdout + probe.stderr)
+        native = re.search(r"native reader: (\d+) program", probe.stdout)
+        xdat = "XDAT at +0x18" in probe.stdout
+        native_count = int(native.group(1)) if native else 0
+        stages = re.findall(r"stage (Ps|Vs|Cs|Ms|Gs|Hs|Ds)", probe.stdout)
+        expected = {"ps": "Ps", "cs": "Cs"}[s["stage"]]
+        stage_ok = expected in stages
+
+        translate = run(
+            [args.cargo, "run", "--release", "-p", "xtask", "--",
+             "shader", hash16, "--corpus", corpus, "--dxil", dxil,
+             "--no-disasm", "--no-hlsl"],
+            cwd=REPO, verbose=args.verbose,
+        )
+        report.append(translate.stdout + translate.stderr)
+        if "translation: ok" in translate.stdout:
+            outcome = "ok"
+        elif "translation: refused:" in translate.stdout:
+            reason = translate.stdout.split("translation: refused:", 1)[1]
+            outcome = "refused: " + reason.strip().splitlines()[0]
+        else:
+            outcome = "no translation line"
+
+        pc_native = None
+        if pc_ready:
+            pc_cso = out / pc_rel
+            pc_bytes = pc_cso.read_bytes()
+            pc_hash = hashlib.sha256(pc_bytes).hexdigest()[:16]
+            pc_name = f"{s['stage']}pc_{pc_hash}.bin"
+            shutil.copyfile(pc_cso, corpus / pc_name)
+            pc_probe = run(
+                [args.cargo, "run", "--release", "-p", "xtask", "--",
+                 "shader", pc_hash, "--corpus", corpus, "--probe"],
+                cwd=REPO, verbose=args.verbose,
+            )
+            report.append(
+                f"== {s['name']} pc reference\n" + pc_probe.stdout + pc_probe.stderr
+            )
+            m = re.search(r"native reader: (\d+) program", pc_probe.stdout)
+            pc_native = int(m.group(1)) if m else 0
+
+        state = "ok" if (xdat and native_count >= 1 and stage_ok) else "FAIL"
+        if state != "ok":
+            failures += 1
+        line = (
+            f"{s['stage']} {s['name']}: hash={hash16} "
+            f"xdat={'+0x18' if xdat else 'missing'} "
+            f"native={native_count} stages={','.join(stages) or '-'} "
+            f"translation={outcome}"
+        )
+        if pc_native is not None:
+            line += f" pc_native={pc_native}"
+        print(line)
+        report.append("SUMMARY " + line)
+
+    if not args.dry_run:
+        report_path.write_text("\n".join(report) + "\n", encoding="utf-8")
+        print("report: " + str(report_path))
+        if failures:
+            print(f"{failures} shader(s) did not reach the native reader; see the report")
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,26 @@
+// Original GFX10 test program for tools/shader-diff. It is not game code and
+// is assembled locally (llvm-mc -mcpu=gfx1030) into a compiler-shaped
+// container by make_synthetic.py.txt. It samples a shadow map with a comparison
+// sampler, reads a depth texture with image_load, and writes one dword.
+//
+// Descriptor tables: t0 at s[8:15] (texture), u0 at s[20:23] (raw buffer),
+// s0 at s[16:19] (sampler), loaded from user SGPRs s4 and s6 as the console
+// compiler does.
+.text
+    s_mov_b32 s5, 0
+    s_mov_b32 s7, 0
+    s_load_dwordx8 s[8:15], s[4:5], 0x0
+    s_load_dwordx4 s[20:23], s[4:5], 0x20
+    s_load_dwordx4 s[16:19], s[6:7], 0x0
+    s_waitcnt lgkmcnt(0)
+
+    v_mov_b32 v2, 2.0
+    v_mov_b32 v3, 0.25
+    v_mov_b32 v4, 0.75
+
+    // Compare the depth at (2.0, 0.25) against 0.75 at level 0.
+    image_sample_c_lz v10, v[2:4], s[8:15], s[16:19] dmask:0x1 dim:SQ_RSRC_IMG_2D
+    // Read the same texel as a depth resource.
+    image_load v[11:14], v[2:3], s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D
+    buffer_store_dword v10, off, s[20:23], 0
+    s_endpgm

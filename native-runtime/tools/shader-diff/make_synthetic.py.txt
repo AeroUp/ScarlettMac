@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Build a compiler-shaped synthetic shader container for local validation.
+
+The container has the shape the native reader expects from an Xbox Series
+(Scarlett) compiler output: a DXBC wrapper holding a DXIL part, an XDAT index
+at +0x18 of that part, and an XBCH/zlib/FSSM native compute program. The code
+is an original hand-assembled GFX10 program (synthetic/depth_cmp_cs.s.txt), not
+game data, and the output is meant for a scratch directory outside the
+repository.
+
+This is a fixture generator for tools/shader-diff, not a model of the
+compiler's optimizer. See tools/shader-diff/README.md.
+"""
+
+import argparse
+import hashlib
+import struct
+import zlib
+from pathlib import Path
+
+ABSENT = 0xDEADBEEFDEADBEEF
+FSSM_VERSION = 0x101
+XBCH_VERSION = 3
+RECORD_SIZE = 0x54
+CS_STAGE_DATA = 0x40
+
+
+def root_table(user_data, slot):
+    # u32 root type (3 = table), u32 table offset in dwords, u32 user SGPRs,
+    # u32 base register, u8 first user-data dword, u8 root slot, u16 0.
+    return struct.pack("<IIIIBBH", 3, 0, 1, 0, user_data, slot, 0)
+
+
+def used(kind, user_data, slot, table_offset_dwords, dwords):
+    # u8 resource type (0 SRV, 1 sampler, 3 UAV), u8 root type (3 = table),
+    # u16 0, u32 table offset in dwords, u32 lower bound, u32 stride,
+    # u8 descriptor dwords, u8 first user-data dword, u8 root slot, u8 0.
+    return struct.pack(
+        "<BBHIIIBBBB",
+        kind, 3, 0, table_offset_dwords, 0, 0, dwords, user_data, slot, 0
+    )
+
+
+def fssm(cs_code, threads=(32, 1, 1), wave32=True, vgprs=32, user_sgprs=8):
+    payload = bytearray(0x70)
+    struct.pack_into("<Q", payload, 0, 6)  # graphics slot count
+    for at in (0x08, 0x10, 0x18, 0x20, 0x28, 0x30, 0x48):
+        struct.pack_into("<Q", payload, at, ABSENT)
+
+    record = len(payload)
+    payload += b"\x00" * RECORD_SIZE
+
+    stage = bytearray(CS_STAGE_DATA)
+    struct.pack_into("<I", stage, 0x24, user_sgprs << 1)  # COMPUTE_PGM_RSRC2
+    struct.pack_into("<III", stage, 0x28, *threads)
+
+    code_at = record + RECORD_SIZE + len(stage)
+    layout_at = code_at + len(cs_code)
+    layout = root_table(4, 1) + root_table(6, 2)
+    descriptors = (
+        used(0, 4, 1, 0, 8)    # SRV table: texture s[8:15]
+        + used(3, 4, 1, 8, 4)   # UAV table: buffer s[20:23]
+        + used(1, 6, 2, 0, 4)   # sampler table: s[16:19]
+    )
+    used_at = layout_at + len(layout)
+
+    struct.pack_into("<Q", payload, record + 0x00, code_at)
+    struct.pack_into("<Q", payload, record + 0x08, len(cs_code))
+    struct.pack_into("<I", payload, record + 0x14, (1 << 5) if wave32 else 0)
+    struct.pack_into("<Q", payload, record + 0x28, layout_at)
+    struct.pack_into("<Q", payload, record + 0x30, used_at)
+    struct.pack_into("<II", payload, record + 0x38, 2, 3)
+    struct.pack_into("<I", payload, record + 0x4c, 0)
+    struct.pack_into("<I", payload, record + 0x50, vgprs | (31 << 20))
+    struct.pack_into("<Q", payload, 0x60, record)  # CS slot
+
+    payload += stage + cs_code + layout + descriptors
+    return b"FSSM" + struct.pack("<IQ", FSSM_VERSION, len(payload)) + bytes(payload)
+
+
+def xbch(unpacked):
+    stream = zlib.compress(unpacked, 6)
+    return (
+        b"XBCH"
+        + struct.pack("<I", XBCH_VERSION)
+        + struct.pack("<Q", len(stream))
+        + struct.pack("<Q", len(unpacked))
+        + stream
+    )
+
+
+def dxil_part(native):
+    # DxilProgramHeader (a stub: no bitcode) followed by XDAT at +0x18.
+    header = struct.pack("<II", (5 << 16) | 0x66, 0)  # cs_6_6, size patched
+    header += b"DXIL"
+    header += struct.pack("<III", 0x106, 0, 0)
+    assert len(header) == 0x18
+
+    entries = [(0x07, b"NOBC"), (0x0D, xbch(native)), (0x12, bytes(16))]
+    body_at = 0x18 + 12 + 12 * len(entries)
+    index = bytearray(b"XDAT" + struct.pack("<II", len(entries), 0x24))
+    blobs = bytearray()
+    for tag, blob in entries:
+        index += struct.pack("<III", tag, body_at + len(blobs), len(blob))
+        blobs += blob
+    part = bytearray(header + index + blobs)
+    struct.pack_into("<I", part, 4, len(part) // 4)
+    return bytes(part)
+
+
+def dxbc(parts):
+    table = 0x20 + 4 * len(parts)
+    total = table + sum(8 + len(data) for _, data in parts)
+    out = bytearray(b"DXBC" + bytes(16) + struct.pack("<HHII", 1, 0, total, len(parts)))
+    offset = table
+    for _, data in parts:
+        out += struct.pack("<I", offset)
+        offset += 8 + len(data)
+    for fourcc, data in parts:
+        out += fourcc + struct.pack("<I", len(data)) + data
+    return bytes(out)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--code", required=True, type=Path, help="raw GFX10 code")
+    ap.add_argument("--out", required=True, type=Path, help="corpus directory")
+    ap.add_argument("--name", default="depth_cmp")
+    args = ap.parse_args()
+
+    code = args.code.read_bytes()
+    if not code or len(code) % 4:
+        raise SystemExit("code must be a non-empty whole number of dwords")
+    container = dxbc(
+        [
+            (b"SFI0", struct.pack("<I", 0)),
+            (b"DXIL", dxil_part(fssm(code))),
+        ]
+    )
+    args.out.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(container).hexdigest()[:16]
+    path = args.out / f"cs_{digest}.bin"
+    path.write_bytes(container)
+    print(path)
+    print(f"cs_{digest}")
+
+
+if __name__ == "__main__":
+    main()

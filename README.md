@@ -1,5 +1,41 @@
 # ScarlettMac
 
+Experimental Xbox Series X|S compatibility for Apple Silicon. This fork includes a native runtime that runs the title's x86-64 code through Rosetta, implements Xbox and Windows services in Rust, and sends graphics work directly to Metal.
+
+> [!IMPORTANT]
+> **The native runtime reaches the Series S opening. Gameplay is still unavailable.** Models can stretch or break, lighting is incomplete, and world frame times are still too high for play.
+
+[Build the native runtime](#build-the-native-runtime) · [Apple Silicon specs and FPS estimates](docs/apple-silicon.md) · [Native run details](docs/native-series-s.md) · [CrossOver build](#build-and-run)
+
+## Native Series S progress
+
+![Estimated progress, four of ten milestones demonstrated](assets/native-progress.svg)
+
+The bar counts ten equally weighted milestones. It tracks verified outcomes and gives no release date.
+
+| Demonstrated · 4 | Open · 6 |
+| --- | --- |
+| Native boot, menus and input, loading the opening, presenting world frames | Correct models, correct lighting and shadows, roughly 8 GiB footprint, sustained 5 FPS in the opening, stable world runs across repeats, verified gameplay controls |
+
+In the latest measured native opening on the **18 GiB M3 Pro**, one world interval averaged **745 ms/frame (1.34 FPS)** and the last sampled process footprint was **11.48 GiB**. The included snapshot carries a newer light-list shader fix, an index trace for stretched geometry, and a texture refresher cap. See the [run details](docs/native-series-s.md) for what each change has verified so far.
+
+## Build the native runtime
+
+Use an Apple Silicon Mac with macOS 15 or later, Rosetta, Xcode command-line tools, rustup, and Apple's Metal Shader Converter 3.0 or later. Supply your own legally obtained game files and keep them outside the checkout. [Metal Shader Converter](https://developer.apple.com/metal/shader-converter/)
+
+```sh
+git clone https://github.com/AeroUp/ScarlettMac.git
+cd ScarlettMac/native-runtime
+tools/macos/native-setup.sh
+tools/macos/run-native.sh --console series-s /path/to/your/game/folder
+```
+
+The launcher opens a window and prints the log path. [Native runtime documentation](native-runtime/README.md) · [Source provenance and licenses](SOURCE-NOTICES.md)
+
+## Earlier ScarlettMac captures
+
+The captures below document earlier ScarlettMac tests. Their captions identify the original milestones.
+
 <p align="center">
   <a href="#tested-on-mac"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-0091FF" alt="macOS: Apple Silicon"></a>
   <a href="#tested-on-mac"><img src="https://img.shields.io/badge/Tested-M3%20Max-5832A8" alt="Tested on M3 Max"></a>
@@ -11,7 +47,7 @@
 
 <a name="latest-captures"></a>
 
-## Major breakthroughs on Apple Silicon
+### Major breakthroughs on Apple Silicon
 
 <p align="center">
   <img src="https://img.shields.io/badge/First%20character%20close--up%20on%20MacBook-D1242F?style=for-the-badge" alt="First character close-up on MacBook"><br>
@@ -38,7 +74,7 @@
 
 [Prologue test details](docs/compatibility.md#prologue-rendering-breakthroughs)
 
-## Earlier captures
+### Earlier captures
 
 These images are from tests that preceded the captures above. They are ordered from newer native-window tests down to the earliest XCL setup screens.
 
