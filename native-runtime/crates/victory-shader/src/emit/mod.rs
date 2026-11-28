@@ -1643,6 +1643,7 @@ mod tests {
             }
         };
         let ps = super::HostShader {
+            traces: false,
             splits: Vec::new(),
             table_entries: Vec::new(),
             stage: crate::HwStage::Ps,
@@ -1662,6 +1663,7 @@ mod tests {
         };
         let file = |var: &str, stage| {
             std::env::var(var).ok().map(|p| super::HostShader {
+                traces: false,
                 splits: Vec::new(),
                 table_entries: Vec::new(),
                 stage,

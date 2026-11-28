@@ -758,6 +758,7 @@ fn fmad_probe() -> Result<HostShader, crate::ShaderError> {
         view_marks: false,
     })?;
     Ok(HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: lowered.table_entries,
         stage: HwStage::Cs,
@@ -855,6 +856,7 @@ fn stub(pixel: bool, outputs: Vec<SigElement>) -> HostShader {
         .collect();
     s.m.terminate(b, Term::Ret);
     HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: Vec::new(),
         stage: if pixel {

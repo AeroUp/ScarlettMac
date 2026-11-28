@@ -104,6 +104,7 @@ fn build_wave(words: &[u32], wave64: bool) -> Result<HostShader, crate::ShaderEr
     };
     let lowered = lowered(&native)?;
     Ok(HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: lowered.table_entries,
         stage: HwStage::Cs,

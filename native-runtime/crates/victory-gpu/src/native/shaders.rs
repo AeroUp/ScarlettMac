@@ -245,7 +245,10 @@ impl<B: PresentBackend> Title<B> {
         let binding = Binding { name: name.into(), ..Binding::of(shader) };
         let asked = std::time::Instant::now();
         let made = self.host.backend.create_compute_pipeline_within(&shader.dxil, binding.layout().as_ref(), self.compile_wait);
+        #[cfg(target_os = "macos")]
         super::hosttime::pipeline(asked.elapsed(), matches!(&made, Ok(Some(_))));
+        #[cfg(not(target_os = "macos"))]
+        let _ = asked;
         match made {
             Ok(None) => self.put_off(),
             Ok(Some(pso)) => {
@@ -386,7 +389,10 @@ impl<B: PresentBackend> Title<B> {
         };
         let asked = std::time::Instant::now();
         let made = self.host.backend.create_render_pipeline_within(&desc, self.compile_wait);
+        #[cfg(target_os = "macos")]
         super::hosttime::pipeline(asked.elapsed(), matches!(&made, Ok(Some(_))));
+        #[cfg(not(target_os = "macos"))]
+        let _ = asked;
         match made {
             Ok(None) => self.put_off(),
             Ok(Some(p)) => {

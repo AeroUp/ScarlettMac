@@ -83,6 +83,7 @@ fn build(words: &[u32], buffers: bool) -> HostShader {
     assert_eq!(lowered.nonuniform_handles, 1);
     assert!(!lowered.wave_ops);
     let shader = HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: lowered.table_entries,
         stage: HwStage::Cs,

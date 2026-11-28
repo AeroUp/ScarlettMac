@@ -458,15 +458,7 @@ impl Graphics {
         }
         let mut streams: Vec<VertexStream> = Vec::new();
         for e in &self.inputs {
-            let bytes = crate::resource::element(e.format)
-                .map(|(b, _)| b as u32)
-                .or_else(|| {
-                    self.guess
-                        .as_ref()
-                        .and_then(|_| guessed_vertex_format(&e.name).map(|(_, f)| f.byte_size() as u32))
-                })
-                .unwrap_or(0);
-            let end = (e.offset + bytes) as usize;
+            let end = e.offset as usize + self.element_bytes(e);
             match streams.iter_mut().find(|s| s.slot == e.slot as usize) {
                 Some(s) => s.stride = s.stride.max(end),
                 None => streams.push(VertexStream {
@@ -476,15 +468,30 @@ impl Graphics {
                 }),
             }
         }
-        for s in &mut streams {
+        self.apply_strides(&mut streams);
+        Some((attributes, streams))
+    }
+
+    /// The bytes of one input element's format (0 when unknown to the host).
+    fn element_bytes(&self, e: &Input) -> usize {
+        crate::resource::element(e.format)
+            .map(|(b, _)| b as usize)
+            .or_else(|| self.guess.as_ref().and_then(|_| guessed_vertex_format(&e.name).map(|(_, f)| f.byte_size())))
+            .unwrap_or(0)
+    }
+
+    /// Each stream's stride: where its elements end (four-byte aligned), or the stride of the view
+    /// the draw bound when that is longer.
+    ///
+    /// D3D12's input assembler steps by the view's `StrideInBytes` (a guessed pipeline's comes from
+    /// the draw, a described one's from its `IASetVertexBuffers`): a stream that pads after its last
+    /// element still reads the vertex the title meant. A bound stride past `MAX_STRIDE` is not one
+    /// the assembler takes (2048 bytes; a stale binding of ours can hold anything): the layout's
+    /// elements decide then.
+    fn apply_strides(&self, streams: &mut [VertexStream]) {
+        const MAX_STRIDE: u32 = 4096;
+        for s in streams {
             s.stride = s.stride.next_multiple_of(4);
-            // Streams step by the strides of the views the draw bound: a guessed pipeline's from the
-            // draw, a described one's from its `IASetVertexBuffers` (D3D12's input assembler steps by
-            // the view's stride, so a stream that pads after its last element still reads the vertex
-            // the title meant), whichever is longer than the layout's elements.
-            // A stride past `MAX_STRIDE` is not one D3D12's input assembler takes (2048 bytes; a
-            // stale binding of ours can hold anything): the layout's elements decide then.
-            const MAX_STRIDE: u32 = 4096;
             let bound = self
                 .guess
                 .as_ref()
@@ -507,7 +514,26 @@ impl Graphics {
                 };
             }
         }
-        Some((attributes, streams))
+    }
+
+    /// The stride each stream of [`Self::inputs`] steps by, without a shader's input signature: the
+    /// same rule [`Self::vertex_layout`] applies, for a trace of a draw's vertex data (`slot`,
+    /// stride, per-instance).
+    pub fn stream_strides(&self) -> Vec<(usize, usize, bool)> {
+        let mut streams: Vec<VertexStream> = Vec::new();
+        for e in &self.inputs {
+            let end = e.offset as usize + self.element_bytes(e);
+            match streams.iter_mut().find(|s| s.slot == e.slot as usize) {
+                Some(s) => s.stride = s.stride.max(end),
+                None => streams.push(VertexStream {
+                    slot: e.slot as usize,
+                    stride: end,
+                    per_instance: e.per_instance,
+                }),
+            }
+        }
+        self.apply_strides(&mut streams);
+        streams.into_iter().map(|s| (s.slot, s.stride, s.per_instance)).collect()
     }
 
     /// Blend and write mask of each colour target (target 0's description for all when the blend

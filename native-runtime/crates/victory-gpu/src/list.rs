@@ -2546,7 +2546,7 @@ mod tests {
                 LIST_FUNCTIONS.f[slot], NEWER_LIST_FUNCTIONS.f[slot],
                 "slot {slot:#x} is the same function in both layouts"
             );
-            for (_, method) in METHODS.iter().chain(MORE_METHODS.iter()).chain(NEWER_METHODS.iter()) {
+            for (_, _method) in METHODS.iter().chain(MORE_METHODS.iter()).chain(NEWER_METHODS.iter()) {
                 // The slot is ours to check: it may be any of our functions, but the newer
                 // layout's inserted methods are above it (`barrier_groups` 0x470, `allocate_upload`
                 // 0x490), so no method of theirs may turn up here by a shift.

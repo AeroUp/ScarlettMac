@@ -135,7 +135,7 @@ impl Cache {
     /// needs (`uploaded_mips` says which title mips the host texture already has, `skip` the top
     /// levels it was made without), or `None` when the entry is missing, damaged, or does not hold
     /// every needed level. `hash` is blake3 of the whole tiled buffer.
-    pub fn levels(
+    pub(crate) fn levels(
         &self,
         layout: &Layout,
         dimension: Dimension,
@@ -166,7 +166,7 @@ impl Cache {
     /// Keeps `made` under the key of their source (see [`Self::levels`]), adding to the levels an
     /// entry already holds: a texture streamed in mip by mip writes one entry, not one per mip.
     #[allow(clippy::too_many_arguments)]
-    pub fn store(
+    pub(crate) fn store(
         &self,
         layout: &Layout,
         dimension: Dimension,
@@ -431,6 +431,7 @@ pub(crate) fn store(
 
 /// Whether an entry for exactly what the sync would key exists (tests: that the detile was kept).
 #[cfg(test)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn contains(layout: &Layout, dimension: Dimension, format: u32, hash: &blake3::Hash) -> bool {
     open().is_some_and(|c| c.path_for(&key(layout, dimension, format, hash)).is_file())
 }

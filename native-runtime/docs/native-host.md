@@ -631,6 +631,7 @@ Off by default, environment variables of the host process. The native host's swi
 - `VICTORY_TRACE_OWNERS=1`: who made the memory that comes to share pages (#15), logged as a warning (`VICTORY_TRACE_OWNERS`) with both owners when it happens: a new physical page view over another view (`xmem_physical::record`; the mapping paths unmap first, so it should not happen), page numbers past the 25 bits Grand Theft Auto VI keeps (`number >> 4` in 21 bits) with the page whose number it would rebuild, `VirtualFree(MEM_DECOMMIT)` of a range that still shows views (`MEM_RELEASE` gives them back first, `forget_physical`), and a title mapping (`XMemMapPhysicalPages`, its scatter form, the GPU's `map_alias`) outside every region `VirtualAlloc` or `XMemVirtualAlloc` made (macOS only). Each owner is the public call that made it (the outermost one on that thread), its range, pool id and page index, a sequence number and the title's return address from the host call (`image+offset`; on other threads 0 or a stale one). Off, nothing is recorded: the cost is one read of the switch per view, allocation and free.
 - `VICTORY_DEBUG_PS=id`: every float export of every translated pixel program writes one colour, the low three bytes (red, green, blue) of the 32-bit FNV-1a hash of its console code (a container's `ACCC` code piece, as the `disasm` example takes it; alpha 1), so a target dump (`VICTORY_TRACE_PASSES`, `VICTORY_DUMP_TARGETS`) says which pixel program drew each pixel, and through the pass trace which draw and vertex program. Read a UNORM target (an sRGB one stores the encoded value). A translation switch (`VICTORY_DEBUG_PS` is in the cache key). Made for the world's G-buffer shards ("World geometry drawn as shards (open)"): the 40 pixel programs of the traced G-buffer draws have 40 different colours.
 - `VICTORY_TRACE_ROOT_SPAN[=<bytes>]`: root SRVs and UAVs whose title range stops being linear in its pool within `<bytes>` (default 1 MiB) of the root address (#15). A shader that does not read title memory reaches a root view through a view pair (`addr::root_view`): the pool from the mapping holding the address on, linearly, so past that mapping's end it reads and writes whatever the pool has next, not the title's next mapping. At each draw and dispatch a translated shader's root views are measured (`addr::linear_run`: following mappings that start where the last ended, in the same pool, at the next pool offset), and each one whose run is shorter is logged once per pipeline, root parameter and mapping (`a root view's range leaves its pool's linear run`, at most 2000): the pipeline's shader hashes, SRV or UAV, the dispatch's groups, the run, the first mapping, the mapping the title has where the run ends (`title_next`) and the title address of the pool bytes a pair view reaches there (`pool_next_is`). Root views of programs that read title memory (`through = "table"`) look each access up in the page table; they are logged too. Heap buffer views need no check: a range that is not linear in one pool wraps the title's own mapping instead (see "Heap buffer views not linear in one pool"). Off, the cost is one read of the switch per draw and dispatch. Run of 2026-11-26 (M5 Pro, Series S, crash at frame 2682): the 117 lines are all vertex shaders' root SRVs (root parameter 3, vertex fetch), and 30 of them do have a next title page elsewhere in pool 10 (pages mapped in descending pool order); no dispatch and no root UAV has a run under 1 MiB, so root views do not write the empty BVH nodes over other resources. Those vertex shaders read the wrong vertices past the first page, though: vertex and pixel programs now read root SRVs and UAVs through the page table (`root_memory` in `emit::lower`, with `zero_copy_memory`), one lookup per access, so they log as `through = "table"`; compute programs keep the views (no short run seen there). Tested by `a_vertex_root_view_follows_the_title_across_pages_apart_in_the_pool` (`addr_tests.rs`): a triangle whose first vertex ends one 64 KiB page and whose others start the next one, mapped elsewhere in the pool, was not drawn. Limit: the table has 64 KiB pages, so a page not wholly inside one mapping (mappings of 16 KiB) reads as zeros through it, where a view read it.
+- `VICTORY_DUMP_VERTICES=<dir>,<draws>[,<seconds>]`: one text file a draw for the next `<draws>` draws, from `<seconds>` after the first draw: the pipeline's input layout, the stride each stream steps by (the rule the Metal vertex descriptor is built with), each bound view's address, size and capacity (`view size / stride`), each element's values for the first vertices and the range each channel covers over the first 4,096 (with the count that is not finite, or past 1e6), and the index buffer's values with how many of them name a vertex past slot 0's capacity. Title memory is read by title address, as the title has it now. Off unless set. A mesh drawn as long thin strings or scattered shards is told apart from a mesh whose *data* is wrong by this: an element whose range spans huge or non-finite values is bad data, every index past the capacity is the wrong width or offset, and sane values with a broken picture put the fault in the program or its constants.
 - `VICTORY_TRACE_INDEX=<draws>`: for the first `<draws>` direct indexed draws, reads back the indices the draw will fetch from title memory, at the width the host bound and at the other one (the largest of each over the first 65,536 indices), and each bound vertex stream's capacity (`view size / stride`). A 32-bit index buffer the host reads as 16 bits (or the reverse) draws a mesh as a lattice of long thin triangles: every index becomes two 16-bit ones, and each pair joins vertices far apart in the mesh, while a small mesh with 16-bit indices stays whole. One line a draw. Off, the cost is one read of the switch per indexed draw.
 - `VICTORY_TRACE_STRIDES=1`: each described pipeline whose bound vertex-buffer stride is longer than its input layout's elements, when the pipeline is first made (a stage-in stream steps by the view's stride, so such a stream is read at the stride the title's view gives it; see "A stage-in stream steps by the view's stride"). Off, the cost is one read of the switch per drawn pipeline's layout.
 - `VICTORY_TRACE_PAGES=1`: at each page-table build, what the title's mappings make of every 64 KiB title page: `pages` touched, `readable` (a pair view shows them), `joined` (readable only because the mappings covering them were joined into one run: the title reports an allocation one piece at a time), `split` (the title maps every byte, but no one view shows them: they are in more than one pool) and `gap` (the title really left a hole in the page: reading there is zeros to it too). The first 200 builds are logged. Off, the cost is one read of the switch per build. Test: `native::addr::tests::pages_mapped_one_piece_at_a_time_are_one_run`.
@@ -2918,6 +2919,48 @@ runs of this tree, `VICTORY_TRACE_RESIDENCY=1`:
   sets off for the rest of the run (`heap_resources` +800,000 a frame) — so the 18 GB default's
   first run is also where it faults. Not measured: which of the two (paging of the set, the set's
   removal commits) the 10 to 15 s was; the frame line's own pass split was not on in that run.
+
+**The two costs the frame line's first runs led to (28 November).**
+
+- **A garbage indirect record ran the cap** (`runs/20261128-081945-0WLGIX`): the world load's 30.1 s
+  frame had `gpu_ms` 52,452 ms over 31 command buffers, two of them 25,031 and 24,559 ms. The
+  records the title dispatched 34 s earlier were not counts (`[16648107, 1, 1]`,
+  `[1043942195, 1057145367, 2139095039]`), and the gate clamped each to 262,144 groups and ran the
+  pipeline's real kernel on it. A record with a count past D3D12's per-dimension limit (65,535)
+  now runs **nothing** (`gfx::gate`); within that limit a product past the host's cap still runs
+  clamped. After (`runs/20261128-090602-ytQq5K`): the same burst logs "ran empty (garbage record)"
+  and the load's largest `gpu_ms` is 2,560 ms, its longest frame 12.1 s instead of 30.1 s (the rest
+  is the title's own load).
+- **The scanner's changed textures are read up to 384 MiB a frame** (`runs/20261128-092107-w3oQfk`):
+  the reasons line put `scanner` first (4,761 textures, 18.9 GiB over the run; 386 MiB to 1.1 GiB a
+  frame), then `first` (what streams in, 25 to 545 MiB) and `probe` (58 to 114 MiB); the whole-memory
+  reads and hashes were 1.7 s and 1.2 s of each frame's `prepare_ms`. `SCAN_BUDGET` now admits
+  changed texture memory up to 384 MiB **a frame** (per submission did nothing: 30 submissions a
+  frame each stayed below it), with a never-uploaded texture always read and the rest left in the
+  watch's dirty set for the next frame. Same t=200-330 s of the load, before
+  (`runs/20261128-092107-w3oQfk`) and after (`runs/20261128-094823-as94uq`): textures 808 to 533 a
+  frame, 1,182 to 572 MiB, read 2,185 to 841 ms, hash 1,451 to 619 ms, detile 4,912 to 1,997 ms,
+  `submit_ms` 6,224 to 2,610 and the frame 6,745 to 3,689 ms, with the GPU unchanged (905 to 921
+  ms) because this is CPU-side texturing.
+
+`tools/run-report.py <run>` is the same run in one screen:
+in-world ms/frame from the draw counter's intervals of 150 draws or more, slow command buffers
+(gpu against kernel time), residency slow calls, held-work warnings, drops, refusals and the
+streaming rate; `--compare A B` puts two runs side by side, and `run-case.sh` writes
+`metrics/<label>-report.txt` after every run. On the runs above it reads the in-world median as
+2,443 ms (before the gate fix, `runs/20261128-081945-0WLGIX`), 3,173 ms
+(`runs/20261128-090602-ytQq5K`) and 4,265 ms (`runs/20261128-094823-as94uq`) — two draw-heavy
+intervals each, and later runs reach deeper into the load, so those medians compare scenes as much
+as code. **`runs/20261128-094823-as94uq` (the scanner budget's after-run) is contended**: another
+worker's game was alive during it (two games on an 18 GB Mac swap each other), so its absolute ms
+and in-world median are not to be trusted as a baseline — the same-window comparison below is the
+cut's evidence, and it was measured against a contended run, so the real gain is at least what it
+shows. What they do show per cut is the command-buffer side: the gate fix takes the slowest
+command buffer from 25.07 s to 2.34 s and the slow ones' total from 254.7 s to 134.3 s (their gpu
+time from 67.7 s to 3.5 s). The baseline run (`runs/20261128-002735-VML2vP`, sets off) reads
+4,289 ms in world with 100 slow command buffers totalling 193 s of which 51 s is kernel time —
+the kernel figure is what page faults and residency look like, and none of the runs above has it
+as large.
 
 ## Zero-count dispatches, draws and buffer blits
 

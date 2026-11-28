@@ -141,10 +141,14 @@ static POOLS_LIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// What the title has committed ([`TitleMemory`]).
 pub fn title_memory() -> TitleMemory {
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let heap = crate::host_posix::ucrt::title_heap_bytes();
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    let heap = 0;
     TitleMemory {
         cpu: POOLED[0].load(Ordering::Relaxed),
         graphics: POOLED[1].load(Ordering::Relaxed),
-        heap: crate::host_posix::ucrt::title_heap_bytes(),
+        heap,
         pools: POOLS_LIVE.load(Ordering::Relaxed),
         limit: super::xmem::title_memory_limit() as u64,
     }

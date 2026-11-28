@@ -205,7 +205,10 @@ pub fn counts() -> (u64, u64) {
 /// its caches saved it (and whether a second run hits).
 pub fn summary() -> [u64; 6] {
     let (cached, translated) = counts();
+    #[cfg(target_os = "macos")]
     let (libraries_cached, libraries_converted) = victory_metal::disk::counts();
+    #[cfg(not(target_os = "macos"))]
+    let (libraries_cached, libraries_converted) = (0, 0);
     #[cfg(target_os = "macos")]
     let (archived, _, added) = victory_metal::archive_counts();
     #[cfg(not(target_os = "macos"))]

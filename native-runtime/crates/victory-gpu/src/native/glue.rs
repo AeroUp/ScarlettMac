@@ -15,7 +15,7 @@ use crate::object::This;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use victory_backend::resources::HeapKind;
+use victory_backend::resources::{DrawCall, HeapKind};
 use victory_metal::metal::Metal;
 
 pub type MetalTitle = Title<Metal>;
@@ -2747,6 +2747,15 @@ pub(crate) fn draw(this: This, vertices: u32, instances: u32, first: u32, first_
             let call = if rect {
                 l.list.draw_instanced(4, vertices / 3, 0, first / 3)
             } else {
+                dump_vertices(
+                    l,
+                    DrawCall::Arrays {
+                        vertex_count: vertices,
+                        instance_count: instances,
+                        first_vertex: first,
+                        first_instance,
+                    },
+                );
                 l.list.draw_instanced(vertices, instances, first, first_instance)
             };
             match call {
@@ -2784,6 +2793,49 @@ pub(crate) fn dispatch_mesh(this: This, x: u32, y: u32, z: u32) {
             Err(e) => tracing::warn!(error = %e, "mesh dispatch"),
         }
     });
+}
+
+/// `VICTORY_DUMP_VERTICES=<dir>,<draws>[,<seconds>]`: the next draws' vertex and index data, from
+/// `seconds` after the first draw, read the way the input assembler reads it (`geometry_trace`),
+/// one text file a draw.
+fn dump_vertices(l: &MetalList, call: DrawCall) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let Some((dir, draws, after)) = super::geometry_trace::config() else { return };
+    let start = START.get_or_init(std::time::Instant::now);
+    if start.elapsed().as_secs() < after {
+        return;
+    }
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    if n >= draws {
+        return;
+    }
+    super::geometry_trace::dump(
+        &dir,
+        n,
+        &super::geometry_trace::Bound {
+            pipeline: l.pipeline,
+            topology: (l.topology, super::state::topology(l.topology).map(topology_name)),
+            strides: &l.strides,
+            call,
+            targets: &l.targets,
+            vertex_views: l.list.vertex_views(),
+            index_view: l.list.index_view(),
+        },
+    );
+}
+
+/// `topology`'s name for a trace (`Triangles`, ...).
+fn topology_name(t: victory_backend::resources::Topology) -> &'static str {
+    use victory_backend::resources::Topology::*;
+    match t {
+        Points => "points",
+        Lines => "lines",
+        LineStrip => "line strip",
+        Triangles => "triangles",
+        TriangleStrip => "triangle strip",
+    }
 }
 
 /// `VICTORY_TRACE_INDEX=<draws>`: for the first `<draws>` direct indexed draws, reads back the
@@ -2856,6 +2908,19 @@ pub(crate) fn draw_indexed(this: This, indices: u32, instances: u32, first: u32,
                 }
                 trace_drop(l);
                 return;
+            }
+            if let Some(view) = l.list.index_view() {
+                dump_vertices(
+                    l,
+                    DrawCall::Indexed {
+                        index_count: indices,
+                        instance_count: instances,
+                        first_index: first,
+                        base_vertex: base,
+                        first_instance,
+                        wide: view.2,
+                    },
+                );
             }
             match l.list.draw_indexed_instanced(indices, instances, first, base, first_instance) {
                 Ok(()) => {

@@ -37,6 +37,7 @@ pub(crate) mod descriptor_trace;
 pub mod descriptors;
 pub mod freed;
 #[cfg(target_os = "macos")]
+pub(crate) mod geometry_trace;
 pub(crate) mod glue;
 /// `VICTORY_TRACE_FRAME`: the host's side of a frame (call times, lock waits, texture work).
 #[cfg(target_os = "macos")]

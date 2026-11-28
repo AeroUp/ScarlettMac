@@ -29,6 +29,37 @@ use std::sync::Arc;
 use victory_backend::resources::*;
 use victory_formats::texture::{Dimension, Layout, Swizzle};
 
+/// The pages a decoded copy's title mapping gave back, on macOS (`victory_platform::faults`).
+/// No other host protects title pages, so every call is a no-op there and `active` is false.
+#[cfg(target_os = "macos")]
+mod faults {
+    pub use victory_platform::faults::*;
+}
+#[cfg(not(target_os = "macos"))]
+mod faults {
+    pub fn active() -> bool {
+        false
+    }
+    pub fn release(_: usize, _: usize) {}
+    pub fn restore(_: usize, _: usize) {}
+    pub fn all_out(_: usize, _: usize) -> bool {
+        false
+    }
+}
+
+/// Who in the title asked for what is being made (`VICTORY_TRACE_TARGETS`): the macOS host's
+/// caller hook, and nothing where there is none.
+fn caller() -> Vec<usize> {
+    #[cfg(target_os = "macos")]
+    {
+        super::glue::title_caller()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
 /// `D3D12_RESOURCE_FLAGS`.
 const RENDER_TARGET: u32 = 1;
 const DEPTH_STENCIL: u32 = 2;
@@ -792,13 +823,15 @@ pub(super) const HOT: u32 = 600;
 /// shortcut: past a few thousand blank textures a write is noticed a few submissions late (unless
 /// the scanner catches it first); at least `MIN_SYNC_HOT` of each are probed whatever the time.
 const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
-/// Bytes of texture memory the scanner's changed textures put into one submission's reads. A
-/// world load lists 0.9 to 1.9 GiB a frame (`runs/20261128-092107-w3oQfk`: reasons `scanner` 386
-/// MiB to 1.1 GiB and `first` 25 to 545 MiB), whose whole-memory reads and hashes were 1.7 and
-/// 1.2 s of the frame's `prepare_ms`. A texture never uploaded is not counted (its content is what
-/// a first draw samples); the rest is read up to this many bytes a submission and the remainder
-/// stays in the watch's dirty set for the next, so a streamed frame catches up over a few
-/// submissions instead of paying all of it in one. Guess: half of what one world-load frame lists.
+/// Bytes of changed texture memory one **frame** (between presents) admits from the scanner into
+/// its submissions' reads. A world load lists 0.9 to 1.9 GiB a frame (`runs/20261128-092107-w3oQfk`:
+/// reasons `scanner` 386 MiB to 1.1 GiB and `first` 25 to 545 MiB) over some 30 submissions, whose
+/// whole-memory reads and hashes were 1.7 and 1.2 s of the frame's `prepare_ms`. A texture never
+/// uploaded is not counted (its content is what a first draw samples); the rest is read up to this
+/// many bytes a frame and the remainder stays in the watch's dirty set for the next, so a streamed
+/// frame catches up over a few frames instead of paying all of it in one. The bound is per frame,
+/// not per submission: 30 submissions each below a per-submission bound still made 1.1 GiB a frame
+/// (the first run of a per-submission `SCAN_BUDGET`). Guess: under the world's own 1.9 GiB.
 const SCAN_BUDGET: u64 = 384 << 20;
 /// Hot textures a submission probes at least, however long the probes take.
 const MIN_SYNC_HOT: usize = 32;
@@ -1278,7 +1311,7 @@ impl<B: PresentBackend> Title<B> {
                     layers = info.depth_or_layers,
                     render_target = info.render_target(),
                     unordered_access = info.flags & UNORDERED_ACCESS != 0,
-                    caller = ?super::glue::title_caller(),
+                    caller = ?caller(),
                     "a render target the title created"
                 );
             }
@@ -1488,6 +1521,7 @@ impl<B: PresentBackend> Title<B> {
                     skipped: 0,
                     partial: false,
                     blank: false,
+                    #[cfg(target_os = "macos")]
                     target_views: Vec::new(),
                     gpu_written: false,
                     zero_copy: true,
@@ -1578,6 +1612,7 @@ impl<B: PresentBackend> Title<B> {
                 skipped: 0,
                 partial: false,
                 blank: false,
+                #[cfg(target_os = "macos")]
                 #[cfg(target_os = "macos")]
                 target_views: Vec::new(),
                 gpu_written: false,
@@ -1845,13 +1880,13 @@ impl<B: PresentBackend> Title<B> {
         // a `PROT_NONE` page it reuses would fault with no copy left to serve it (DirectStorage
         // reusing a streamed texture's memory is exactly that). There is nothing to restore: the
         // bytes are the title's to replace.
-        if self.released.remove(&key).is_some() {
-            if let Some(t) = self.textures.get(&key) {
-                let info = t.info.clone();
-                let (tstart, tend) = page_range(info.memory as usize, info.size);
-                victory_platform::faults::restore(tstart, tend - tstart);
-                let _ = protect(tstart, tend - tstart, PROT_READ_WRITE);
-            }
+        if self.released.remove(&key).is_some()
+            && let Some(t) = self.textures.get(&key)
+        {
+            let info = t.info.clone();
+            let (tstart, tend) = page_range(info.memory as usize, info.size);
+            faults::restore(tstart, tend - tstart);
+            let _ = protect(tstart, tend - tstart, PROT_READ_WRITE);
         }
         self.copies_of.remove(&key);
         self.covered.remove(&key);
@@ -2409,6 +2444,7 @@ impl<B: PresentBackend> Title<B> {
         self.upgrade_trimmed_textures(&pools);
         let mut dirty = watch(|w| std::mem::take(&mut w.dirty));
         // What the scanner alone reported, before the probes add to `dirty` (`VICTORY_TRACE_FRAME`).
+        #[cfg(target_os = "macos")]
         let scanner_dirty: HashSet<usize> = dirty.clone();
         // Hot textures (a movie's planes, a glyph cache) are probed synchronously, round-robin within
         // a time budget so world streaming (thousands of blank textures) never stalls submissions;
@@ -2432,21 +2468,30 @@ impl<B: PresentBackend> Title<B> {
             .filter(|k| !released.contains_key(k))
             .collect();
         // A texture never uploaded goes now (its content is what a draw samples first); a change
-        // the scanner or a probe found waits for the next submission once the budget is spent.
-        let mut spent = 0u64;
+        // the scanner or a probe found waits for the next submission once this frame's budget is
+        // spent.
+        let frame = crate::queue::presented();
+        if self.budget.scan_frame != frame {
+            self.budget.scan_frame = frame;
+            self.budget.scan_bytes = 0;
+        }
+        let left = scan_budget.saturating_sub(self.budget.scan_bytes);
+        let mut admitted = 0u64;
         let mut deferred = Vec::new();
         keys.retain(|&k| {
             if unloaded.contains(&k) {
                 return true;
             }
             let Some(t) = self.textures.get(&k) else { return true };
-            spent = spent.saturating_add(t.info.size as u64);
-            if spent > scan_budget && scan_budget > 0 {
+            let size = t.info.size as u64;
+            if scan_budget > 0 && admitted.saturating_add(size) > left {
                 deferred.push(k);
                 return false;
             }
+            admitted = admitted.saturating_add(size);
             true
         });
+        self.budget.scan_bytes = self.budget.scan_bytes.saturating_add(admitted);
         if !deferred.is_empty() {
             watch(|w| {
                 for k in deferred {
@@ -2458,6 +2503,7 @@ impl<B: PresentBackend> Title<B> {
         // (`first`), a host copy given up and needed again (`evicted`), a change the scanner's
         // watch saw (`scanner`), one a hot or blank texture's probe found (`probe`), or a target
         // the GPU wrote (`gpu written`, which `jobs` skips: nothing of it is read).
+        #[cfg(target_os = "macos")]
         if super::hosttime::enabled() {
             let mut by: Vec<(&'static str, u64, u64)> = Vec::new();
             let mut add = |reason: &'static str, size: u64| match by.iter_mut().find(|(r, ..)| *r == reason) {
@@ -2891,6 +2937,7 @@ impl SyncCost {
     /// `VICTORY_TRACE_FRAME`: what this submission's texture work cost, for the frame line (the
     /// same figures the one-second line below prints, without needing its switch).
     fn publish(&self) {
+        #[cfg(target_os = "macos")]
         super::hosttime::textures(
             self.batches,
             self.textures,
@@ -2947,6 +2994,10 @@ pub struct Budget {
     pub idle_frames: u64,
     /// Submissions so far: the clock [`Tracked::used`] is read on.
     serial: u64,
+    /// The present ([`crate::queue::presented`]) the scanner's budget was last counted for, and
+    /// the bytes of changed texture memory its submissions have admitted since.
+    scan_frame: u64,
+    scan_bytes: u64,
     /// The next submission a check over budget looks for textures to give up (a check that found
     /// too few waits [`RECHECK`] submissions: what entries show changes as the title rewrites them).
     next_check: u64,
@@ -3314,7 +3365,7 @@ impl<B: PresentBackend> Title<B> {
     /// title's), is a render or depth target, or whose memory is not one pool run.
     pub(super) fn release_pages(&mut self, key: usize) -> bool {
         // No helper, no protection: a title access would fault with nobody to serve it.
-        if !victory_platform::faults::active() {
+        if !faults::active() {
             return false;
         }
         let Some(t) = self.textures.get(&key) else { return false };
@@ -3346,10 +3397,10 @@ impl<B: PresentBackend> Title<B> {
         // Unreadable and unwritable, so a title access faults and the helper
         // (`victory_platform::faults`) re-materialises the page from the texture before the access
         // runs. Registered first, so the handler knows the page is ours.
-        victory_platform::faults::release(tstart, len);
+        faults::release(tstart, len);
         if protect(tstart, len, PROT_NONE).is_err() {
             // Not every mapping allows it: put the pages back and keep decoding this one.
-            victory_platform::faults::restore(tstart, len);
+            faults::restore(tstart, len);
             let _ = protect(tstart, len, PROT_READ_WRITE);
             return false;
         }
@@ -3362,6 +3413,7 @@ impl<B: PresentBackend> Title<B> {
     /// Puts `key`'s console bytes back into its (released) title pages, re-tiled from the decoded
     /// texture, and makes them writable again: what a fault handler does before letting the
     /// title's access run, and what is needed before the copy is given up or read again.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(super) fn restore_pages(&mut self, key: usize) -> bool {
         let Some(&bytes) = self.released.get(&key) else { return false };
         let Some(t) = self.textures.get(&key) else {
@@ -3373,7 +3425,7 @@ impl<B: PresentBackend> Title<B> {
         // Ours no more first (a fault on a page already restored must not wait), then writable.
         // Only the title's mapping was released; the pool's alias stayed writable.
         let (tstart, tend) = page_range(info.memory as usize, info.size);
-        victory_platform::faults::restore(tstart, tend - tstart);
+        faults::restore(tstart, tend - tstart);
         let _ = protect(tstart, tend - tstart, PROT_READ_WRITE);
         let mut tiled = vec![0u8; info.size];
         if download(&self.host.backend, &t.texture, &info, &mut tiled).is_err() {
@@ -3406,7 +3458,7 @@ impl<B: PresentBackend> Title<B> {
             .filter(|&k| {
                 self.textures
                     .get(&k)
-                    .is_some_and(|t| !victory_platform::faults::all_out(t.info.memory as usize, t.info.size))
+                    .is_some_and(|t| !faults::all_out(t.info.memory as usize, t.info.size))
             })
             .collect();
         for key in keys {
@@ -3416,7 +3468,7 @@ impl<B: PresentBackend> Title<B> {
             };
             let info = t.info.clone();
             let (tstart, tend) = page_range(info.memory as usize, info.size);
-            victory_platform::faults::restore(tstart, tend - tstart);
+            faults::restore(tstart, tend - tstart);
             let _ = protect(tstart, tend - tstart, PROT_READ_WRITE);
             self.released.remove(&key);
             if let Some(t) = self.textures.get_mut(&key) {
@@ -4042,7 +4094,10 @@ impl<B: PresentBackend> Title<B> {
             let (_, maps) = self.host.memory().mappings();
             let mapped: u64 = maps.iter().map(|&(_, len, ..)| len as u64).sum();
             let metal = victory_backend::backend::ComputeBackend::allocated_bytes(&self.host.backend);
+            #[cfg(target_os = "macos")]
             let footprint = victory_platform::mem::footprint() as u64;
+            #[cfg(not(target_os = "macos"))]
+            let footprint = 0u64;
             tracing::info!(
                 "host texture copies: {} MiB, budget {} MiB, idle {} frames; {} MiB shown by heap entries, named by the submission's tables or viewed for unordered access, {} MiB could be given up, {} MiB of that only by entries no work in flight can read yet; {} MiB the GPU wrote (render targets, depth, unordered access), {} MiB of those could be given up; given up in the last second {} ({} MiB), {} ({} MiB) idle, made again {}, {} made again within {} submissions of being given up ({} MiB) in the last second and {} ({} MiB) so far; {} MiB of distinct title memory under the copies, {} MiB of copies outside the title's pools, {} MiB of copies duplicating another copy of the same memory ({} memories); in the last second {} textures shared an identical copy ({} share one now), {} placed copies another placement covered were given up ({} MiB), {} covered still in use; title memory mapped {} MiB in {} mappings, Metal {} MiB, footprint {} MiB, {} copies waiting for a submission to name them",
                 self.budget.live >> 20, self.budget.limit >> 20, idle_frames, shown >> 20, evictable >> 20, stale >> 20,
@@ -4096,7 +4151,8 @@ pub type Textures<B> = HashMap<usize, Tracked<B>>;
 
 /// Render-target shapes the title created `(w, h, format, flags)`: how many, their bytes in title
 /// memory, and their layer count -- the memory line's top ten is what says which of them to cut.
-static TARGET_SHAPES: std::sync::Mutex<Option<HashMap<(u32, u32, u32, u32), (u64, u64, u32)>>> =
+type TargetShapes = HashMap<(u32, u32, u32, u32), (u64, u64, u32)>;
+static TARGET_SHAPES: std::sync::Mutex<Option<TargetShapes>> =
     std::sync::Mutex::new(None);
 
 /// The render-target shapes by bytes, largest first, as `(bytes, count, w, h, format, layers,

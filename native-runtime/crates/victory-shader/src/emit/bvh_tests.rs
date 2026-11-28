@@ -603,6 +603,7 @@ fn build(wide: bool, memory: bool) -> HostShader {
     })
     .expect("lower");
     let shader = HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: lowered.table_entries,
         stage: HwStage::Cs,

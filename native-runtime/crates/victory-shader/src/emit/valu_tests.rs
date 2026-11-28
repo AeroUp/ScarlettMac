@@ -151,6 +151,7 @@ fn try_build_valu_cs(body: &[u32]) -> Result<HostShader, crate::ShaderError> {
     })?;
 
     let shader = HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: lowered.table_entries,
         stage: HwStage::Cs,
@@ -1390,6 +1391,7 @@ fn lower_cs32_with(
     })
     .expect("lower");
     let shader = HostShader {
+        traces: false,
         splits: Vec::new(),
         table_entries: lowered.table_entries,
         stage: HwStage::Cs,
