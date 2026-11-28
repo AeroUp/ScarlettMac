@@ -193,11 +193,17 @@ pub(crate) fn lower_graphics(parts: &Parts, guessed: bool) -> Result<Lowered, Sh
     // A dword of an image's descriptor that the program reads but the lazy pass could not make
     // (a loop-carried value, a use that is no number) is made at its load on one more pass.
     let mut eager_image_dwords = false;
+    // Barycentric input VGPRs a program reads as data are loaded from `SV_Barycentrics` only on
+    // a pass after one they refused. The passes before keep them unknown, so a program that
+    // never needs them (a value that keeps one only in lanes or a half nothing reads) translates
+    // as it did before they could be loaded, with no SV_Barycentrics input.
+    let mut eager_barycentrics = false;
     loop {
         #[cfg(test)]
         PASSES.set(PASSES.get() + 1);
         let mut lower = Lower::new(parts, &bad, console, guessed);
         lower.eager_image_dwords |= eager_image_dwords;
+        lower.eager_barycentrics = eager_barycentrics;
         match lower.run() {
             Ok(l) => return Ok(l),
             Err(Stop::Retry(phis)) => {
@@ -222,6 +228,15 @@ pub(crate) fn lower_graphics(parts: &Parts, guessed: bool) -> Result<Lowered, Sh
                 bad.retain(|_, w| *w != DESCRIPTOR_IMAGE_REST);
                 eager_image_dwords = true;
             }
+            // Refused for a barycentric read as data, or after a join with one gave up: once more
+            // with them loaded.
+            Err(Stop::Fail(ShaderError::Unsupported { what, .. }))
+                if !eager_barycentrics
+                    && (what == RAW_BARYCENTRIC || bad.values().any(|&w| w == RAW_BARYCENTRIC)) =>
+            {
+                bad.retain(|_, w| *w != RAW_BARYCENTRIC);
+                eager_barycentrics = true;
+            }
             Err(Stop::Fail(e)) => return Err(e),
         }
     }
@@ -230,6 +245,23 @@ pub(crate) fn lower_graphics(parts: &Parts, guessed: bool) -> Result<Lowered, Sh
 const TWO_PI: f32 = std::f32::consts::TAU;
 /// `s_sendmsg` id of a mesh or NGG stage's output allocation request.
 const GS_ALLOC_REQ: u16 = 9;
+/// DXIL semantic kind of `SV_Barycentrics`.
+pub(crate) const BARYCENTRICS: u8 = 28;
+/// A barycentric input VGPR's value until something reads it as data (`Lower::barycentric`).
+const RAW_BARYCENTRIC: Why = "barycentrics read directly";
+
+/// The DXIL interpolation mode of a barycentric kind; the pull model has none.
+fn interp_mode(b: Barycentric) -> Option<u8> {
+    Some(match b {
+        Barycentric::PerspectiveCenter => 2,
+        Barycentric::PerspectiveCentroid => 3,
+        Barycentric::PerspectiveSample => 6,
+        Barycentric::LinearCenter => 4,
+        Barycentric::LinearCentroid => 5,
+        Barycentric::LinearSample => 7,
+        Barycentric::PerspectivePullModel => return None,
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Numeric {
@@ -475,6 +507,11 @@ struct Lower<'a> {
     rect_corner: Option<(usize, V, V)>,
     /// Stage-in input channels already loaded in the entry block.
     loaded_inputs: Map<(usize, u8), Val>,
+    /// Barycentric input VGPRs (pixel), loaded from `SV_Barycentrics` when read as data on an
+    /// eager pass (`lower_graphics`): most programs read them only through `v_interp_*`, which
+    /// loads the attribute itself.
+    raw_barycentrics: Map<Value, (Barycentric, u8)>,
+    eager_barycentrics: bool,
     /// Active corner evaluation pass for `SV_VertexID`-driven rectangle lists (`lower/rect.rs`).
     rect_pass: Option<rect::RectPass>,
 }
@@ -1289,6 +1326,8 @@ impl<'a> Lower<'a> {
             debug_pos: None,
             rect_corner: None,
             loaded_inputs: Map::default(),
+            raw_barycentrics: Map::default(),
+            eager_barycentrics: false,
             rect_pass: None,
         }
     }
@@ -2332,6 +2371,11 @@ impl<'a> Lower<'a> {
                     Some(&Input::InstanceId) if self.rect_pass.is_some() => {
                         Val::I32(self.s.m.i32(0))
                     }
+                    // Loaded on first use as data (`get`).
+                    Some(&Input::Barycentric { kind, index }) => {
+                        self.raw_barycentrics.insert(v, (kind, index));
+                        Val::Missing(RAW_BARYCENTRIC)
+                    }
                     Some(&input) => self.input(input),
                     // Registers no one set read as zero (the validator
                     // refuses reads of undef).
@@ -2354,7 +2398,7 @@ impl<'a> Lower<'a> {
                     None => Val::Missing("a vertex input the signature lacks"),
                 };
             }
-            Input::Barycentric { .. } => return Val::Missing("barycentrics read directly"),
+            Input::Barycentric { kind, index } => return self.barycentric(kind, index),
             Input::PrimitiveId => return Val::Missing("the primitive id"),
             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
             // host's value can be.
@@ -2484,6 +2528,77 @@ impl<'a> Lower<'a> {
             }
         };
         self.load_input(id, col)
+    }
+
+    /// Barycentric input VGPR `index` (0 i, 1 j) of `kind`, read as data rather than through
+    /// `v_interp_*`: a channel of an `SV_Barycentrics` element interpolated as `kind` says, one
+    /// element per mode. `v_interp_p1/p2` make P0 + i·(P1 - P0) + j·(P2 - P0), so i and j are
+    /// the weights of the primitive's vertices 1 and 2, which are `SV_Barycentrics.y` and `.z`
+    /// (x is vertex 0's; `victory-gpu`'s `raw_barycentrics_are_the_weights_of_vertices_1_and_2`
+    /// draws it through Metal). Guess (docs/native-host.md, "Barycentrics read as data"): the
+    /// console's P0 is the primitive's first vertex in D3D order, as [`Self::interp`] takes it
+    /// for the provoking vertex; strips' odd triangles are unchecked. Centre modes only: the
+    /// Metal Shader Converter refuses the others ("Interpolation mode for pixel barycentrics is
+    /// not supported"), and DXIL allows one perspective and one linear SV_Barycentrics, which
+    /// the two centre modes are.
+    fn barycentric(&mut self, kind: Barycentric, index: u8) -> Val {
+        let mode = match interp_mode(kind) {
+            Some(mode @ (2 | 4)) => mode,
+            Some(_) => return Val::Missing("centroid or sample barycentrics read directly"),
+            None => return Val::Missing("pull-model barycentrics read directly"),
+        };
+        let found = self
+            .s
+            .inputs
+            .iter()
+            .position(|e| e.kind == BARYCENTRICS && e.interp == mode);
+        let id = match found {
+            Some(id) => id,
+            None => {
+                // Measured (Metal Shader Converter 4.0.3, macOS 27.2 on an M4 Max): without an
+                // SV_Position input, the converter's perspective barycentrics are not divided by
+                // their sum (each is the vertex's screen-space weight over its w); with one,
+                // they are perspective-correct. So the program declares it, read or not.
+                if mode == 2 && !self.s.inputs.iter().any(|e| e.kind == 3) {
+                    let row = self
+                        .s
+                        .inputs
+                        .iter()
+                        .filter_map(|e| e.row)
+                        .map(|r| r + 1)
+                        .max()
+                        .unwrap_or(0);
+                    self.s.inputs.push(SigElement {
+                        name: "SV_Position".into(),
+                        index: 0,
+                        kind: 3,
+                        comp: 9,
+                        interp: 4,
+                        row: Some(row),
+                        col: 0,
+                        cols: 4,
+                        usage: 0,
+                        half: false,
+                    });
+                }
+                let index = self.s.inputs.iter().filter(|e| e.kind == BARYCENTRICS).count();
+                self.s.inputs.push(SigElement {
+                    name: "SV_Barycentrics".into(),
+                    index: index as u32,
+                    kind: BARYCENTRICS,
+                    comp: 9,
+                    interp: mode,
+                    // Not packed: no register (as DXC declares it).
+                    row: None,
+                    col: 0,
+                    cols: 3,
+                    usage: 0,
+                    half: false,
+                });
+                self.s.inputs.len() - 1
+            }
+        };
+        self.load_any_input(id, index + 1)
     }
 
     /// A component of a compute thread or group id, read in the entry block.
@@ -2639,6 +2754,16 @@ impl<'a> Lower<'a> {
         // are; only one without needs to know whether it is a lane mask.
         if let Some(val @ (Val::I32(_) | Val::Bit(_))) = found {
             return Ok(val);
+        }
+        let raw = self.raw_barycentrics.get(&v).copied().filter(|_| self.eager_barycentrics);
+        if let (Some(Val::Missing(_)), Some((kind, index))) = (found, raw) {
+            return match self.barycentric(kind, index) {
+                Val::Missing(why) => Err(why),
+                val => {
+                    self.vals.insert(v, val);
+                    Ok(val)
+                }
+            };
         }
         if self.mask_ok && (self.x.st.masks.contains_key(&v) || self.x.st.highs.contains_key(&v)) {
             return self.mask_dword(v).map(Val::I32);
@@ -11997,15 +12122,7 @@ impl<'a> Lower<'a> {
                 ..
             } => (
                 attribute,
-                match barycentric {
-                    Barycentric::PerspectiveCenter => 2,
-                    Barycentric::PerspectiveCentroid => 3,
-                    Barycentric::PerspectiveSample => 6,
-                    Barycentric::LinearCenter => 4,
-                    Barycentric::LinearCentroid => 5,
-                    Barycentric::LinearSample => 7,
-                    Barycentric::PerspectivePullModel => return Err("pull-model interpolation"),
-                },
+                interp_mode(*barycentric).ok_or("pull-model interpolation")?,
             ),
             // P0, the provoking vertex: a flat (nointerpolation) input.
             Interp::Vertex {
@@ -15899,10 +16016,25 @@ impl<'a> Lower<'a> {
                     }
                     // An input an unguarded counted `v_movreld` loop overwrites
                     // before anything reads it (PR #457).
-                    (Some(Val::Missing("barycentrics read directly")), false)
+                    (Some(Val::Missing(RAW_BARYCENTRIC)), false)
                         if read && self.overwritten_movreld_edge(b, phi, n).is_some() =>
                     {
                         self.s.m.undef(self.s.t.i32)
+                    }
+                    // A barycentric input read as data after the join.
+                    (Some(Val::Missing(RAW_BARYCENTRIC)), false)
+                        if read
+                            && self.eager_barycentrics
+                            && self.raw_barycentrics.contains_key(&arg) =>
+                    {
+                        match self.get(arg) {
+                            Ok(Val::I32(x)) => x,
+                            Ok(_) => unreachable!("a barycentric is a dword"),
+                            Err(why) => {
+                                retry.push((phi.value, why));
+                                continue 'phi;
+                            }
+                        }
                     }
                     (Some(Val::Bit(_)), false) if read => {
                         retry.push((phi.value, "an SCC joined with SGPR values"));

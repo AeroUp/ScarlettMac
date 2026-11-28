@@ -534,6 +534,39 @@ Each of the 91 has `mix` pairs. `mesh_tests::a_half_kept_by_mixlo_and_replaced_b
 (`victory-gpu`) draws the shape on Metal in both orders: a pixel program that interpolates with
 `v0`/`v1` and then packs (1.0, 0.5) into `v1` draws (1.0, 0.5, 1.0, 1.0).
 
+## Barycentrics read as data (`SV_Barycentrics`)
+
+Pixel programs that read their barycentric VGPRs (`SPI_PS_INPUT_ADDR` bits 0-6) as numbers, not
+only through `v_interp_p1/p2_f32`, were refused as "barycentrics read directly": 420 of the 31,575
+containers this Mac's runs kept, 26 of them bound in a run to the world.
+
+Such a read is now a channel of a DXIL `SV_Barycentrics` input (`Lower::barycentric`): kind 28,
+system value 23, a float3 with no register (as DXC declares it), with `ShaderFlags` bit 22 and
+`SFI0` 0x20000. `v_interp` makes P0 + i·(P1 - P0) + j·(P2 - P0), so i and j are vertices 1 and
+2's weights, `SV_Barycentrics.y` and `.z`. **Guess:** the console's P0 is the first vertex in D3D
+order, as `interp` assumes for the provoking vertex; strips' odd triangles are unchecked.
+
+- PERSP_CENTER is mode 2 and LINEAR_CENTER `noperspective` (4), one element each. Centroid and
+  sample pairs stay refused ("centroid or sample barycentrics read directly"): the Metal Shader
+  Converter refuses those modes (IRError 8). The pull model stays refused too.
+- Measured (Metal Shader Converter 4.0.3, macOS 27.2.1, M4 Max): without an `SV_Position` input,
+  its perspective barycentrics are each vertex's screen weight over its w, not normalised. With
+  one declared, read or not, they are right, so the translation adds it.
+- Lazily, like the image dwords: `lower_graphics` loads them only on a pass after one refused for
+  them, so every program that translated before has the same output. Loading them on the first
+  pass changed 734 such programs: a guarded write or a `v_fma_mix` keeps one in lanes or a half
+  that nothing reads.
+
+Corpus (28 November): 484 more programs translate (29,587 to 30,071, 28 bound in the world run),
+no output changed, no regression. 412 were refused for this; 72 for a reason a later pass met
+after a join with a barycentric gave up (44 "a descriptor read only as data", 28 a lane mask
+"not written by a scalar ALU instruction"). The other 8 now refuse as "the first half of an
+interpolation". All 420 read PERSP_CENTER. Tests: `gfx_refusal_tests::raw_barycentrics_*`,
+`emit::tests::indexed_move_initializes_an_input_before_its_first_use`, and
+`mesh_tests::raw_barycentrics_are_the_weights_of_vertices_1_and_2` (`victory-gpu`), which draws a
+triangle with w 1.5, 2 and 0.75 on Metal and checks every pixel's i and j (it fails without the
+`SV_Position`).
+
 ## LDS instructions addressed by M0
 
 `ds_append`, `ds_consume`, `ds_read_addtid_b32` and `ds_write_addtid_b32` have no address

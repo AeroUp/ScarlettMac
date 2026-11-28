@@ -764,6 +764,11 @@ fn a_pixel_program_writes_exact_bits_to_an_r32uint_target() {
 /// The bits of input VGPR `v` an R32Uint target gets, per texel of an 8x8 target, from a pixel
 /// program whose register image gives input enables `ena`.
 fn exported_input(ena: u32, v: u32) -> Option<Vec<u32>> {
+    exported_input_of(TRIANGLE, ena, v)
+}
+
+/// [`exported_input`] of a triangle drawn by the vertex program `vs`.
+fn exported_input_of(vs: &[u32], ena: u32, v: u32) -> Option<Vec<u32>> {
     let code = [
         0xF800_1801, v, // exp mrt0 v<v>, off, off, off done vm
         0xBF81_0000, // s_endpgm
@@ -772,7 +777,7 @@ fn exported_input(ena: u32, v: u32) -> Option<Vec<u32>> {
     let mut meta = [0; 0x10];
     meta[12] = 0x40;
     let c = victory_shader::emit::graphics::container_with_inputs(HwStage::Ps, &bytes, &meta, Some(ena)).unwrap();
-    let ms = translate(HwStage::Vs, TRIANGLE);
+    let ms = translate(HwStage::Vs, vs);
     let mut t = title()?;
     let state = Graphics::guess_base().for_draw(vec![Format::R32Uint], None, vec![], &[], false);
     let ps = shaders::translate_targets(&c, 1).unwrap();
@@ -803,6 +808,69 @@ fn a_pixel_program_reads_its_fixed_point_position_where_the_register_image_says(
     let Some(words) = exported_input(0x8080, 1) else { return };
     let want: Vec<u32> = (0..64u32).map(|i| i % 8 | (i / 8) << 16).collect();
     assert_eq!(words, want);
+}
+
+/// [`TRIANGLE`] with w 1.5, 2 and 0.75 at its vertices (x and y scaled by them, so it stays where
+/// it was): perspective and screen-space barycentrics differ.
+fn triangle_with_w() -> Vec<u32> {
+    let mut words = TRIANGLE.to_vec();
+    let at = words.iter().position(|&w| w == 0x7E0C_02F2).unwrap() + 1; // after v_mov_b32 v6, 1.0
+    words.splice(
+        at..at,
+        [
+            0x7E0C_02FF, 0x3FC0_0000, // v_mov_b32 v6, 1.5
+            0x7E18_02F4, // v_mov_b32 v12, 2.0
+            0x7D84_0281, // v_cmp_eq_u32 vcc, 1, v1
+            0x020C_1906, // v_cndmask_b32 v6, v6, v12, vcc
+            0x7E18_02FF, 0x3F40_0000, // v_mov_b32 v12, 0.75
+            0x7D84_0282, // v_cmp_eq_u32 vcc, 2, v1
+            0x020C_1906, // v_cndmask_b32 v6, v6, v12, vcc
+            0x1004_0D02, // v_mul_f32 v2, v2, v6
+            0x1006_0D03, // v_mul_f32 v3, v3, v6
+        ],
+    );
+    words
+}
+
+/// A pixel program that reads its barycentric VGPRs as data (it exports each, as an R32Uint
+/// target's bits) gets SV_Barycentrics' y and z: the weights of the triangle's vertices 1 and 2,
+/// as `v_interp_p1/p2` use them (P0 + i·P10 + j·P20). The triangle is (-1, -1), (3, -1), (-1, 3)
+/// with w 1.5, 2 and 0.75, so on the 8x8 target the screen-space weights at texel (x, y) are
+/// (x + 0.5) / 16 and (7.5 - y) / 16 for vertices 1 and 2. PERSP_CENTER (enable bit 1) gives
+/// the perspective-correct weights, LINEAR_CENTER (bit 5) the screen-space ones, alone or both
+/// in one program (v0-v1 and v2-v3). Without the SV_Position input the translation adds for it,
+/// the converter's perspective weights were each vertex's screen weight over its w.
+#[test]
+fn raw_barycentrics_are_the_weights_of_vertices_1_and_2() {
+    let vs = triangle_with_w();
+    let w = [1.5f32, 2.0, 0.75];
+    // Per texel: perspective i, j, then linear i, j.
+    let want = |n: usize| {
+        let (x, y) = ((n % 8) as f32, (n / 8) as f32);
+        let (s1, s2) = ((x + 0.5) / 16.0, (7.5 - y) / 16.0);
+        let s = [1.0 - s1 - s2, s1, s2];
+        let sum: f32 = (0..3).map(|k| s[k] / w[k]).sum();
+        [s[1] / w[1] / sum, s[2] / w[2] / sum, s[1], s[2]]
+    };
+    // (enables, VGPR, which of `want`)
+    let cases = [
+        (0x2, 0, 0),
+        (0x2, 1, 1),
+        (0x20, 0, 2),
+        (0x20, 1, 3),
+        (0x22, 0, 0),
+        (0x22, 1, 1),
+        (0x22, 2, 2),
+        (0x22, 3, 3),
+    ];
+    for (ena, v, k) in cases {
+        let Some(got) = exported_input_of(&vs, ena, v) else { return };
+        for (n, bits) in got.into_iter().enumerate() {
+            let (got, want) = (f32::from_bits(bits), want(n)[k]);
+            let at = format!("enables {ena:#x}, v{v}, texel {n}");
+            assert!((got - want).abs() < 1e-5, "{at}: {got}, want {want}");
+        }
+    }
 }
 
 /// Line stipple alone enabled (0x80): v0 is its coordinate, 0 for a triangle (a guess).
@@ -854,3 +922,4 @@ fn a_half_kept_by_mixlo_and_replaced_by_mixhi_draws_without_the_barycentric() {
         assert!(got.iter().all(|p| *p == [255, 128, 255, 255]), "{order}: {got:?}");
     }
 }
+

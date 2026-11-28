@@ -251,6 +251,10 @@ Besides those, the translator itself refused 216 cache entries (9 distinct reaso
 lane masks read as data 90, descriptors read only as data or neither loaded nor built 59, `v_cvt_f32_f64` 19,
 barycentrics read directly 17, a lane-mask join of an untracked mask 11, a descriptor chosen by control flow 11, `v_permlanex16_b32` 9); they never
 produce DXIL, so they are not in the table. No hull, domain, geometry or ray stages occur in the cache.
+(Since 28 November barycentrics read directly are `SV_Barycentrics` for the centre pairs; the converter
+refuses that input with a centroid or sample mode, IRError 8, so those pairs stay refused in the
+translator, and its perspective ones need an `SV_Position` input: docs/native-host.md, "Barycentrics
+read as data".)
 
 Failures:
 

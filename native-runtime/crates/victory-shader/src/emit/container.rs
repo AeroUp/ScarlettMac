@@ -44,6 +44,7 @@ impl SigElement {
             18 => 68,
             19 => 67,
             20 => 69,
+            28 => 23, // barycentrics
             30 => 25, // cull primitive
             _ => 0,
         }
@@ -597,6 +598,7 @@ mod tests {
             (13, 9),  // front face
             (16, 64), // target
             (17, 65), // depth
+            (28, 23), // barycentrics
             (30, 25), // cull primitive
             (0, 0),   // arbitrary
             (99, 0),  // unknown

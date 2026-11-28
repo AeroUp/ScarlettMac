@@ -3218,3 +3218,135 @@ fn a_wave64_relay_skip_on_exec_lo_alone_does_not_make_an_edge_unneeded() {
     let err = emit_wave64_cs(&w, 64, false).err().map(|e| e.to_string()).unwrap_or_default();
     assert!(err.contains("lane-mask join") && err.contains("0x48"), "{err:?}");
 }
+
+/// The input elements `PSV0` lists: (semantic kind, interpolation mode, columns, allocated).
+fn psv_inputs(dxil: &[u8]) -> Vec<(u8, u8, u8, bool)> {
+    let c = Container::parse(dxil).unwrap();
+    let psv = c.part(FourCC::PSV0).expect("PSV0").data;
+    let u32_at = |at: usize| crate::dxbc::u32_at(psv, at).unwrap() as usize;
+    let size = u32_at(0);
+    let inputs = usize::from(psv[4 + 28]);
+    // Resource bindings, the string table and the semantic indices, then the elements.
+    let mut at = 4 + size;
+    let resources = u32_at(at);
+    at += 4;
+    if resources > 0 {
+        at += 4 + resources * u32_at(at);
+    }
+    at += 4 + u32_at(at);
+    at += 4 + 4 * u32_at(at);
+    if inputs == 0 {
+        return vec![];
+    }
+    let stride = u32_at(at);
+    at += 4;
+    (0..inputs)
+        .map(|i| {
+            let e = &psv[at + stride * i..at + stride * (i + 1)];
+            (e[11], e[13], e[10] & 0xF, e[10] & 0x40 != 0)
+        })
+        .collect()
+}
+
+fn sfi0(dxil: &[u8]) -> u64 {
+    let c = Container::parse(dxil).unwrap();
+    let part = c.part(FourCC::SFI0).expect("SFI0").data;
+    u64::from_le_bytes(part[..8].try_into().unwrap())
+}
+
+/// A pixel program that reads its barycentric VGPRs as data (here exporting them), not only
+/// through `v_interp_*`, translates: i and j are `SV_Barycentrics` y and z, the element
+/// interpolated as the `SPI_PS_INPUT_ADDR` bit of those VGPRs says (PERSP_CENTER: mode 2, with
+/// an SV_Position input the converter needs for it; LINEAR_CENTER: mode 4), unpacked (no
+/// register, as DXC declares it), with the Barycentrics feature in `SFI0`. It was refused as
+/// "barycentrics read directly".
+#[test]
+fn raw_barycentrics_read_sv_barycentrics_in_their_mode() {
+    let code = [
+        0xF800_180F,
+        0x0001_0100, // exp mrt0 v0, v1, v1, v0 done vm
+        0xBF81_0000, // s_endpgm
+    ];
+    for (bit, mode) in [(1, 2u8), (5, 4)] {
+        let out = lower_ps(&code, false, vec![], vec![], 1 << bit, 0, vec![], true)
+            .unwrap_or_else(|e| panic!("bit {bit}: {e}"));
+        let isg1 = parsed_isg1(&out.dxil);
+        let bary: Vec<_> = isg1.iter().filter(|e| e.kind == lower::BARYCENTRICS).collect();
+        assert_eq!(bary.len(), 1, "bit {bit}: {isg1:?}");
+        assert_eq!((bary[0].name.as_str(), bary[0].index), ("SV_Barycentrics", 0));
+        assert_eq!(bary[0].row, None, "bit {bit}: not packed");
+        assert_eq!(bary[0].cols, 3, "bit {bit}: a float3");
+        let psv = psv_inputs(&out.dxil);
+        let bary: Vec<_> = psv.iter().filter(|e| e.0 == lower::BARYCENTRICS).collect();
+        assert_eq!(bary, [&(lower::BARYCENTRICS, mode, 3, false)], "bit {bit}");
+        // The perspective one declares SV_Position (unread), allocated.
+        let position: Vec<_> = psv.iter().filter(|e| e.0 == 3).collect();
+        let want: &[_] = if mode == 2 { &[&(3, 4, 4, true)] } else { &[] };
+        assert_eq!(position, want, "bit {bit}");
+        assert_ne!(sfi0(&out.dxil) & 0x2_0000, 0, "bit {bit}: no Barycentrics feature");
+    }
+
+    // A perspective and a linear pair, both read: two elements (DXIL's limit), indices 0 and 1.
+    let both = [
+        0xF800_180F,
+        0x0302_0100, // exp mrt0 v0, v1, v2, v3 done vm
+        0xBF81_0000,
+    ];
+    let out = lower_ps(&both, false, vec![], vec![], 1 << 1 | 1 << 5, 0, vec![], true).unwrap();
+    let mut got: Vec<_> = psv_inputs(&out.dxil).into_iter().map(|(k, m, ..)| (k, m)).collect();
+    got.sort_unstable();
+    assert_eq!(got, [(3, 4), (lower::BARYCENTRICS, 2), (lower::BARYCENTRICS, 4)]);
+    let isg1 = parsed_isg1(&out.dxil);
+    let bary = isg1.iter().filter(|e| e.kind == lower::BARYCENTRICS);
+    let mut indices: Vec<_> = bary.map(|e| e.index).collect();
+    indices.sort_unstable();
+    assert_eq!(indices, [0, 1]);
+
+    // Read only through `v_interp_*`: no SV_Barycentrics and no feature.
+    let interp = [
+        0xBEFC_0300, // s_mov_b32 m0, s0
+        0xC808_0000, // v_interp_p1_f32 v2, v0, attr0.x
+        0xC809_0001, // v_interp_p2_f32 v2, v1, attr0.x
+        0xF800_180F,
+        0x0202_0202, // exp mrt0 v2, v2, v2, v2 done vm
+        0xBF81_0000,
+    ];
+    let texcoord = PsInput {
+        usage: Usage::Generic,
+        row: 0,
+        mask: 0b1111,
+        attr: 0,
+        flat: false,
+        fp16: false,
+        pack2: false,
+        row2: 0,
+    };
+    let inputs = vec![sig_el("TEXCOORD", 0, 0, 9, 0, Some(0), 4)];
+    let out = lower_ps(&interp, false, vec![], vec![texcoord], 1 << 1, 0, inputs, true).unwrap();
+    assert!(parsed_isg1(&out.dxil).iter().all(|e| e.kind != lower::BARYCENTRICS && e.kind != 3));
+    assert_eq!(sfi0(&out.dxil) & 0x2_0000, 0);
+}
+
+/// What the host cannot give stays refused: the pull model's (bit 3) i, j and 1/w, which
+/// `SV_Barycentrics` does not hold, and the centroid and sample modes (bits 0, 2, 4, 6), which
+/// the Metal Shader Converter refuses as SV_Barycentrics.
+#[test]
+fn raw_barycentrics_refused_where_the_host_cannot_give_them() {
+    let refused = |words: &[u32], addr: u32| {
+        match lower_ps(words, false, vec![], vec![], addr, 0, vec![], true) {
+            Err(ShaderError::Unsupported { what, .. }) => what,
+            other => panic!("{addr:#x}: {:?}", other.map(|_| ())),
+        }
+    };
+    let export_v0 = [0xF800_1801, 0x0000_0000, 0xBF81_0000]; // exp mrt0 v0 done vm
+    assert_eq!(refused(&export_v0, 1 << 3), "pull-model barycentrics read directly");
+    for bit in [0, 2, 4, 6] {
+        assert_eq!(refused(&export_v0, 1 << bit), "centroid or sample barycentrics read directly");
+    }
+    // The centre pair beside a centroid one: reading the centroid pair refuses the program.
+    let export_v0_v2 = [0xF800_1803, 0x0000_0200, 0xBF81_0000]; // exp mrt0 v0, v2 done vm
+    assert_eq!(
+        refused(&export_v0_v2, 1 << 1 | 1 << 2),
+        "centroid or sample barycentrics read directly"
+    );
+}
