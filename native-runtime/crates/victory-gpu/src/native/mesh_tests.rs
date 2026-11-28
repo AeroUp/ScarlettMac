@@ -166,8 +166,10 @@ fn a_counted_indirect_mesh_dispatch_runs_only_the_records_below_the_count() {
 }
 
 /// A mesh dispatch record that asks for more than the cap is what a culling pass left unfinished
-/// in title memory: the gate clamps it to the cap, so it draws a bounded number of groups (never
-/// billions, which never end), and one below the cap draws as asked.
+/// in title memory. Within D3D12's per-dimension limit (65,535) the gate clamps its product to the
+/// cap, so it draws a bounded number of groups; with a count past that limit it is garbage and
+/// runs nothing (`victory_metal::gfx::gate`, since 28 November: a garbage record clamped to the
+/// cap still held command buffers for 25 s). One below the cap draws as asked.
 #[test]
 fn an_indirect_mesh_dispatch_past_the_most_groups_is_clamped() {
     let (ms, ps) = (translate(HwStage::Vs, TRIANGLE), translate(HwStage::Ps, RED));
@@ -178,7 +180,7 @@ fn an_indirect_mesh_dispatch_past_the_most_groups_is_clamped() {
     };
     let pool = super::Pool::new(&t.host, 1);
     let red = [255, 128, 128, 255];
-    for (record, want) in [([1u32, 1, 1], red), ([256, 256, 65], red), ([1, 1_182_027_346, 1_314_076_063], red), ([1, 1, 64], red)] {
+    for (record, want) in [([1u32, 1, 1], red), ([256, 256, 65], red), ([1, 1_182_027_346, 1_314_076_063], [0; 4]), ([1, 1, 64], red)] {
         pool.write(0, &record);
         let (color, mut list) = list_into(&t, &pso, binding.clone());
         list.dispatch_mesh_indirect(pool.va(0), None).unwrap();
