@@ -56,6 +56,18 @@ fn buffer_descriptor_dwords_read_as_data_translate() {
     );
 }
 
+/// An image descriptor's dword 0 (its title address in 256-byte units), read as data: served
+/// from the bound texture's memory (`victory-gpu`'s `texture_words`), where the translator
+/// refused it. These are the two appending-free compute shaders of the 27 November run's 114
+/// that were blocked on nothing else.
+#[test]
+fn image_descriptor_base_addresses_read_as_data_translate() {
+    assert_translates(
+        "an image's base address (dword 0) read as data",
+        &["cbb5aaad3dc55cc4", "ea4e30202d5918fd"],
+    );
+}
+
 /// `ds_append` / `ds_consume` in a console wave the host runs as two 32-lane waves: the
 /// frame's light-list compute (`0eda771eedd6fd25`, whose loss leaves the world's lights
 /// unbuilt) and two more of a world run, each refused for the split wave.

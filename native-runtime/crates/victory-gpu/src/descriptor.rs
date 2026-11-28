@@ -982,29 +982,46 @@ static FUNCTIONS: Table<24> = {
     Table::new(f)
 };
 
-/// A texture view's console image descriptor dwords 0-3 as far as its size
-/// goes: width - 1 and height - 1 of the resource's level 0 (dword 1 bits
-/// 30-31, dword 2 bits 0-13 and 14-29), dword 3 an identity swizzle, the
-/// view's first and last level (bits 12-15, 16-19) and the image type (bits
-/// 28-31). `None` for buffers and samplers.
-// shortcut: the address, format and tiling fields read 0 (no translated
-// shader reads them: the shader refuses such reads where it can tell),
-// and the swizzle is the identity whatever the view's component mapping.
+/// A texture view's console image descriptor dwords 0-3 as far as it goes: dword 0 the
+/// title address of the texture's memory in 256-byte units (bits 39-8, as the hardware's
+/// descriptor holds it), width - 1 and height - 1 of the resource's level 0 (dword 1 bits
+/// 30-31, dword 2 bits 0-13 and 14-29), dword 3 an identity swizzle, the view's first and
+/// last level (bits 12-15, 16-19) and the image type (bits 28-31). `None` for buffers and
+/// samplers.
+// shortcut: the format and tiling fields read 0 (no translated shader reads them: the
+// shader refuses such reads where it can tell), and the swizzle is the identity whatever
+// the view's component mapping.
 pub(crate) fn texture_words(view: &View) -> Option<[u32; 4]> {
-    let (resource, desc, unordered) = match view {
-        View::Shader(r, desc) => (crate::resource::texture_desc(*r as crate::object::This)?, *desc, false),
-        View::Unordered(r, _, desc) => (crate::resource::texture_desc(*r as crate::object::This)?, *desc, true),
+    let (resource, desc, unordered, address) = match view {
+        View::Shader(r, desc) => {
+            let t = *r as crate::object::This;
+            let info = crate::resource::texture_info(t)?;
+            (crate::resource::texture_desc(t)?, *desc, false, info.memory as usize as u64)
+        }
+        View::Unordered(r, _, desc) => {
+            let t = *r as crate::object::This;
+            let info = crate::resource::texture_info(t)?;
+            (crate::resource::texture_desc(t)?, *desc, true, info.memory as usize as u64)
+        }
+        // A placed view names its memory in the view's own words 10 and 11.
         View::Placed(unordered, resource, desc) if resource[0] != 1 => {
-            (*resource, desc[..10].try_into().ok(), *unordered)
+            let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
+            (*resource, desc[..10].try_into().ok(), *unordered, address)
         }
         _ => return None,
     };
-    Some(image_words(&resource, desc.as_ref(), unordered))
+    Some(image_words(&resource, desc.as_ref(), unordered, address))
 }
 
-/// [`texture_words`] of a texture of resource description `resource` (as
-/// words) through a view of description `desc` (none: the resource's own).
-pub(crate) fn image_words(resource: &[u32; 14], desc: Option<&[u32; 10]>, unordered: bool) -> [u32; 4] {
+/// [`texture_words`] of a texture at title address `address` (dword 0, in 256-byte units)
+/// of resource description `resource` (as words) through a view of description `desc`
+/// (none: the resource's own).
+pub(crate) fn image_words(
+    resource: &[u32; 14],
+    desc: Option<&[u32; 10]>,
+    unordered: bool,
+    address: u64,
+) -> [u32; 4] {
     let width = u64::from(resource[4]) | u64::from(resource[5]) << 32;
     let height = resource[6];
     let (depth, mips) = (resource[7] & 0xFFFF, resource[7] >> 16);
@@ -1044,7 +1061,7 @@ pub(crate) fn image_words(resource: &[u32; 14], desc: Option<&[u32; 10]>, unorde
     let (w, h) = (width.saturating_sub(1) as u32, height.saturating_sub(1));
     let last = first + count.max(1) - 1;
     [
-        0,
+        (address >> 8) as u32,
         (w & 3) << 30,
         (w >> 2 & 0x3FFF) | (h & 0xFFFF) << 14,
         0xFAC | (first & 0xF) << 12 | (last & 0xF) << 16 | ty << 28,
@@ -1147,18 +1164,24 @@ pub(crate) mod tests {
     fn an_unordered_view_takes_its_level_from_mip_slice() {
         // 600x400, ten mips: resource words as `create_texture` keeps them.
         let texture: [u32; 14] = [3, 0, 0, 0, 600, 0, 400, 10 << 16, 28, 1, 0, 0x100, 0, 0];
+        // Dword 0 is the address in 256-byte units: bits 39-8 of it.
+        assert_eq!(
+            image_words(&texture, None, false, 0x1234_5600)[0],
+            0x0012_3456,
+            "an image's base address"
+        );
         let mut view = [0u32; 10];
         view[1] = 4; // 2D
         view[4] = 1; // MostDetailedMip
         view[5] = u32::MAX; // every mip from there
         assert_eq!(
-            image_words(&texture, Some(&view), false)[3],
+            image_words(&texture, Some(&view), false, 0)[3],
             0xFAC | 1 << 12 | 9 << 16 | 9 << 28
         );
         // An unordered view of level 3: that level alone.
         let uav = [0, 4, 3, 0, 0, 0, 0, 0, 0, 0];
         assert_eq!(
-            image_words(&texture, Some(&uav), true)[3],
+            image_words(&texture, Some(&uav), true, 0)[3],
             0xFAC | 3 << 12 | 3 << 16 | 9 << 28
         );
         // An unordered view of level 2 of six array slices: word 4 is the
@@ -1166,7 +1189,7 @@ pub(crate) mod tests {
         let array: [u32; 14] = [3, 0, 0, 0, 600, 0, 400, 6 | 4 << 16, 28, 1, 0, 0x100, 0, 0];
         let uav = [0, 5, 2, 1, 6, 0, 0, 0, 0, 0];
         assert_eq!(
-            image_words(&array, Some(&uav), true)[3],
+            image_words(&array, Some(&uav), true, 0)[3],
             0xFAC | 2 << 12 | 2 << 16 | 13 << 28
         );
     }

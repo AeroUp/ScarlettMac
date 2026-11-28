@@ -7437,6 +7437,15 @@ impl<'a> Lower<'a> {
         // Dwords 5 to 7 are made where the program reads them (see `get`): a view's metadata
         // costs shifts and masks, and most programs that load a descriptor whole read none.
         let mut rest = None;
+        // An image's dword 0 is its title address in 256-byte units: the view addresses hold it
+        // (the host's `texture_words`), so a program that reads it as data — the console compiler
+        // spills the descriptor to VGPR lanes and reads the dwords back — gets the texture's
+        // address where the host knows one.
+        let image_address = if image.is_some() {
+            self.view_address_dword(site, first, u32::from(first)).ok()
+        } else {
+            None
+        };
         let words: Vec<(u32, V)> = match image {
             Some(kind) => {
                 let one = self.s.m.i32(1);
@@ -7480,10 +7489,14 @@ impl<'a> Lower<'a> {
                     let mip = self.s.m.bin(c, Bin::Shl, levels, four);
                     let d5 = self.s.m.bin(c, Bin::Or, perf, mip);
                     let zero = k(self, 0);
-                    vec![(1, d1), (2, d2), (3, d3), (4, depth), (5, d5), (6, zero), (7, zero)]
+                    let mut w = vec![(1, d1), (2, d2), (3, d3), (4, depth), (5, d5), (6, zero), (7, zero)];
+                    w.extend(image_address.map(|x| (0, x)));
+                    w
                 } else {
                     rest = Some(levels);
-                    vec![(1, d1), (2, d2), (3, d3), (4, depth)]
+                    let mut w = vec![(1, d1), (2, d2), (3, d3), (4, depth)];
+                    w.extend(image_address.map(|x| (0, x)));
+                    w
                 }
             }
             // A buffer's dwords the size query does not give are the view's own, from the
@@ -8145,11 +8158,11 @@ impl<'a> Lower<'a> {
     /// size fields of dwords 1-3 (width, height, first and last level, type:
     /// size queries of a texture the program never samples). They come from
     /// the host's view addresses, `t1` in [`super::shader::MEMORY_SPACE`]:
-    /// four dwords per heap index. The table gives a buffer's dword 3 and every
-    /// other field as 0, so a program that can see one of their bits
-    /// (`seen_bits`) is refused: an image's base address, minimum level and
-    /// format (dword 0, dword 1 bits 0-29), dword 2 bits 30-31, tiling (dword
-    /// 3 bits 20-27) and dwords 4-7.
+    /// four dwords per heap index. An image's dword 0 is its title address in
+    /// 256-byte units; the table gives the minimum level and format (dword 1
+    /// bits 0-29), dword 2 bits 30-31, tiling (dword 3 bits 20-27) and dwords
+    /// 4-7 as 0, so a program that can see one of their bits (`seen_bits`) is
+    /// refused naming the field.
     // shortcut: the swizzle reads as the identity; the kind of view is the
     // load's (eight dwords at a whole descriptor: an image) and the table
     // offset's computed part is taken as whole descriptors (32-byte
@@ -8160,10 +8173,7 @@ impl<'a> Lower<'a> {
         const BUFFER_REST: Why =
             "a view address field the table gives as 0: a buffer's dwords 4-7";
         const IMAGE: [(u32, Why); 4] = [
-            (
-                0,
-                "a view address field the table gives as 0: an image's base address",
-            ),
+            (!0, ""),
             (
                 0xC000_0000,
                 "a view address field the table gives as 0: an image's base address, minimum \

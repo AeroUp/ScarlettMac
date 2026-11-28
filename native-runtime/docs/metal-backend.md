@@ -671,7 +671,11 @@ and raises fence values.
   A program can change reason as the one before it is fixed, so some counts rise. A buffer's dwords 0,
   1 and 3 now come from the view addresses' table (`lower::view_address_dword`), as `view_addresses`
   already served a descriptor read only as data, and `v_cvt_pk_u16_u32`/`v_cvt_pk_i16_i32` clamp and
-  pack 16 bits (ISA 9.3.4).
+  pack 16 bits (ISA 9.3.4). An image's dword 0 is its title address in 256-byte units, which the host
+  now fills (`descriptor::image_words` from the bound texture's memory, or a placed view's own words
+  10-11): the 361 image-address refusals went to 0, 10 programs translate and the other 351 show the
+  next reason in their chain — the lane-mask classes below (97 -> 275 and 42 -> 199), i.e. a mask the
+  console compiler spills to a VGPR lane and reads back, which the structure cannot join per lane.
 - **The largest class is not a descriptor** (an image's base address read as data: 350 of the store,
   361 after the fixes above, and 99 of a 27 November world run's 225 dropped pipelines). Of those 99,
   all are 113-120 KB compute programs, and the dword 0 they "read" is only *spilled*: for

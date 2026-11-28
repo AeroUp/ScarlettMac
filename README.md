@@ -48,14 +48,17 @@ tools/macos/run-native.sh --console series-s /path/to/your/game/folder
 | Frame rate | 🟥 About 1.3 FPS at best in the world (745 ms/frame), target 5 FPS |
 | Memory | 🟨 8.0–11.5 GB footprint, target about 8 GB like the console |
 | Models | 🟥 Stretched, "stringy" geometry; index trace in progress |
-| Lighting and shadows | 🟥 Mostly dark; shadow maps draw, but lighting drops them |
-| Dropped draws | 🟨 About 5% with a warm shader cache |
+| Lighting | 🟨 First lit world on Nov 28: skin, sky, clouds and metal are shaded; large areas still dark |
+| Shadows | 🟥 Not confirmed on screen yet |
+| Dropped draws | 🟨 3% (refused shaders down from 244 to 176) |
 | Stability | 🟨 Runs of 8–14 minutes; some end on the game's 30-second watchdog |
 | Gameplay | 🟥 Not reached |
 
 ## Screenshots from native runs
 
 All captured on an M3 Pro (18 GB) running the Series S profile in a window, November 27–28, 2026. The overlay in the top left is the run HUD (F3).
+
+<p align="center"><a href="assets/native/lit-world.jpg"><img src="assets/native/lit-world.jpg" width="860" alt="Lit character, cloudy sky and lit props in the Series S opening"></a><br><strong>First lit world (November 28, build 1edbd4db)</strong><br>The descriptor fix let Metal build the lighting shaders.</p>
 
 <table>
   <tr>

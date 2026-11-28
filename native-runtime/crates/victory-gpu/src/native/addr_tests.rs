@@ -1387,6 +1387,39 @@ fn run_with_lds(t: &mut Title<Metal>, words: &[u32], wave64: bool, threads: u32)
     super::run(&t.host, &[&l]);
 }
 
+/// A kept container of `hash`, translated with the host's options and made a Metal compute
+/// pipeline: what a run does with it. `None` without `VICTORY_SHADER_STORE`.
+fn compile_kept_container(t: &mut Title<Metal>, hash: &str) -> Option<bool> {
+    let dir = std::env::var_os("VICTORY_SHADER_STORE")?;
+    let bytes = std::fs::read(std::path::PathBuf::from(dir).join(hash)).ok()?;
+    let shader = shaders::translate(&bytes).expect("the container translates");
+    Some(matches!(t.compute_pipe(&shader, hash), Pipe::Compute(_)))
+}
+
+/// An image descriptor's dword 0 (its base address, in 256-byte units) read as data: the real
+/// containers of the 27 November run that were blocked on nothing else, translated and converted
+/// into Metal compute pipelines. (Most of the class is a console compiler spill of the descriptor
+/// to VGPR lanes, still stopped by the lane-mask join model, not by the address.)
+#[test]
+fn image_base_addresses_read_as_data_make_host_pipelines() {
+    let Some(mut t) = title() else { return };
+    for hash in ["cbb5aaad3dc55cc4", "6e307678f0d2eb36"] {
+        let Some(made) = compile_kept_container(&mut t, hash) else { return };
+        assert!(made, "{hash}: {:?}", t.shaders);
+    }
+    assert_eq!(t.shaders.refusals(), 0, "{:?}", t.shaders.refused);
+}
+
+/// A buffer descriptor's dword 1 (the address's high bits and the stride) read as data, from the
+/// view addresses' table: the real container of a world run, translated and converted.
+#[test]
+fn buffer_descriptor_dword_1_read_as_data_makes_a_host_pipeline() {
+    let Some(mut t) = title() else { return };
+    let Some(made) = compile_kept_container(&mut t, "008c909bee8cc93e") else { return };
+    assert!(made, "{:?}", t.shaders);
+    assert_eq!(t.shaders.refusals(), 0, "{:?}", t.shaders.refused);
+}
+
 /// The world's appending compute shaders are translated and converted to Metal compute
 /// pipelines: the real containers, not synthetic programs, through the host's own options and
 /// the converter. `0eda771eedd6fd25` (one group) is the frame's light list, whose loss leaves the

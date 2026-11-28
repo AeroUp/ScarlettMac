@@ -921,16 +921,12 @@ fn an_images_last_descriptor_dwords_read_as_data_are_its_views() {
         let part = fspx(&bytes_of(&code), 5 << 1, [32, 1, 1], true, &resources);
         crate::dxbc::build(&[(FourCC::ACCC, &part)])
     };
-    for read in [0x7E02_0211, 0x7E02_0212, 0x7E02_0213] {
+    // Dwords 5 to 7, and dword 0: the image's title address in 256-byte units, from the
+    // bound texture's memory (`victory-gpu`'s `texture_words`).
+    for read in [0x7E02_020C, 0x7E02_0211, 0x7E02_0212, 0x7E02_0213] {
         let shader = translate_with(&program(read), Options::default());
         assert!(shader.is_ok(), "{read:#x}: {:?}", shader.err());
     }
-    let err = translate_with(&program(0x7E02_020C), Options::default()).err();
-    assert!(
-        matches!(err, Some(ShaderError::Unsupported { what, .. })
-            if what.contains("an image's base address (dword 0)")),
-        "{err:?}"
-    );
 }
 
 /// A descriptor read only as data takes its dwords from the view addresses (`t1`), which hold a
@@ -970,6 +966,7 @@ fn view_address_fields_the_table_gives_as_0_are_refused() {
     // s_lshr_b64 s[20:21], s[12:13], 8, then s_and_b32 s20, s21, mask: dword 1 bits 8 on.
     let shifted = |mask: u32| vec![0x9094_880C, 0x8714_FF15, mask];
     let accepted = [
+        (true, mov(12)),
         (false, mov(12)),
         (false, mov(13)),
         (false, and(13, 0xFFFF)),
@@ -993,7 +990,6 @@ fn view_address_fields_the_table_gives_as_0_are_refused() {
     let prefix = "a view address field the table gives as 0: ";
     let dword_1 = "an image's base address, minimum level or format (dword 1)";
     let refused = [
-        (true, mov(12), "an image's base address"),
         (true, and(13, 0xFF), dword_1),
         (true, and(13, 0x1FF0_0000), dword_1),
         (true, mov(14), "an image's dword 2"),
