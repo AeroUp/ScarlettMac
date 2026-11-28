@@ -23,6 +23,8 @@ mod bindless;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
 pub mod clock;
+/// A cache entry mapped read-only (`texture_cache`): the upload reads it without a heap copy.
+mod mmap;
 #[cfg(windows)]
 #[cfg(windows)]
 mod composite;
@@ -98,12 +100,17 @@ pub use host::on_failure;
 /// host thread may call it before it writes. `true` when a page in the range was released.
 #[cfg(target_os = "macos")]
 pub fn title_memory_write(at: usize, len: usize) -> bool {
+    // Whoever writes, the bytes are counted as streamed (`native::textures::host_wrote`): the memory
+    // line splits the decoded copies by what their content came from, and a streamed copy's console
+    // bytes are given back to the OS once they are uploaded.
+    native::textures::host_wrote(at, len);
     victory_platform::faults::open_for_write(at, len)
 }
 
 /// Nothing is released on a host without the page-fault path.
 #[cfg(not(target_os = "macos"))]
-pub fn title_memory_write(_at: usize, _len: usize) -> bool {
+pub fn title_memory_write(at: usize, len: usize) -> bool {
+    native::textures::host_wrote(at, len);
     false
 }
 

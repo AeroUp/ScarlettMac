@@ -245,6 +245,68 @@ impl PoolTable {
         out
     }
 
+    /// The pages of `[addr, addr + len)` as `[addr & !(page-1), ...)`, each one's title address to
+    /// share when the title maps it and `None` for a hole, with a hash that changes when the
+    /// mapping under any page does. `None` when no page is mapped (or an argument is unusable).
+    /// One lock for the whole walk: a partly mapped range is served page by page (`title_holes`).
+    pub fn page_map(&self, addr: u64, len: u64, page: usize) -> Option<(u64, Vec<Option<usize>>)> {
+        use std::hash::{Hash, Hasher};
+        if page == 0 || page & (page - 1) != 0 {
+            return None;
+        }
+        let (addr, len) = (usize::try_from(addr).ok()?, usize::try_from(len.max(1)).ok()?);
+        let base = addr & !(page - 1);
+        let end = addr.checked_add(len)?.checked_add(page - 1)? & !(page - 1);
+        let g = self.lock();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut sources = Vec::with_capacity((end - base) / page);
+        let mut any = false;
+        let mut at = base;
+        while at < end {
+            let page_end = at + page;
+            // The mapping covering this page from `at`, and the mappings that continue it to the
+            // page's end (a page reported one piece at a time).
+            let mut covered = false;
+            if let Some((&start, m)) = g.maps.range(..=at).next_back()
+                && at < start + m.len
+                && g.pools.contains_key(&m.pool)
+            {
+                let mut title_end = start + m.len;
+                let mut pool_end = m.offset + m.len;
+                let mut pieces = vec![(start, m.len, m.pool, m.offset)];
+                covered = true;
+                while title_end < page_end {
+                    let Some(next) = g.maps.get(&title_end) else {
+                        covered = false;
+                        break;
+                    };
+                    if next.len == 0 || next.pool != m.pool || next.offset != pool_end {
+                        covered = false;
+                        break;
+                    }
+                    pieces.push((title_end, next.len, next.pool, next.offset));
+                    title_end += next.len;
+                    pool_end += next.len;
+                }
+                if covered {
+                    any = true;
+                    for p in &pieces {
+                        p.hash(&mut h);
+                    }
+                    sources.push(Some(at));
+                } else {
+                    (at, 0u8).hash(&mut h);
+                    sources.push(None);
+                }
+            } else {
+                (at, 1u8).hash(&mut h);
+                sources.push(None);
+            }
+            at = page_end;
+        }
+        any.then(|| (h.finish(), sources))
+    }
+
     /// Whether any byte in `[addr, addr + len)` is currently mapped in a pool.
     pub fn any_mapped(&self, addr: u64, len: u64) -> bool {
         let Ok(addr) = usize::try_from(addr) else {

@@ -112,3 +112,108 @@ impl Drop for Alias {
         }
     }
 }
+
+const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+
+/// One zero-filled page every hole of a [`PageMap`] can share (made once, never written).
+fn shared_zero_page(page: usize) -> Option<*mut u8> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ZERO: AtomicUsize = AtomicUsize::new(0);
+    let seen = ZERO.load(Ordering::Relaxed);
+    if seen != 0 {
+        return Some(seen as *mut u8);
+    }
+    let region = Region::new(page, None)?;
+    let ptr = region.ptr;
+    // The page lives as long as the process: every hole maps it.
+    std::mem::forget(region);
+    let _ = ZERO.compare_exchange(0, ptr as usize, Ordering::Relaxed, Ordering::Relaxed);
+    Some(ptr)
+}
+
+/// A private range of `len` bytes whose every `page`-sized page shows either a page of the title's
+/// memory or a hole: a page covers what the title maps there, shared (a remap, not a copy, so
+/// later writes by either side are seen by both), and a hole reads 0. A buffer view over a range
+/// the title maps only in part wraps this, where D3D12 tier 2 reads 0 only at unmapped tiles.
+///
+/// A hole is one shared zero page when `zero_shared` (`true` for a view nothing writes); a
+/// writable view leaves its holes as its own zero pages, so a stored tile cannot reach another
+/// view's hole.
+pub struct PageMap {
+    pub ptr: *mut u8,
+    pub len: usize,
+}
+
+impl PageMap {
+    /// `source(k)` is page `k`'s title address to share, `None` for a hole.
+    pub fn new(
+        len: usize,
+        page: usize,
+        zero_shared: bool,
+        source: impl FnMut(usize) -> Option<usize>,
+    ) -> Result<PageMap, i32> {
+        if page == 0 || len == 0 || !len.is_multiple_of(page) {
+            return Err(-1);
+        }
+        let region = Region::new(len, None).ok_or(-1)?;
+        let mut map = PageMap { ptr: region.ptr, len };
+        // The range is this struct's now (dropped by `Drop`).
+        std::mem::forget(region);
+        match map.refresh(page, zero_shared, source) {
+            Ok(()) => Ok(map),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// [`Self::new`]'s page mapping over the range already held: each page is remapped from its
+    /// source now (the range and its address stay, so a buffer made over it stays valid).
+    pub fn refresh(
+        &mut self,
+        page: usize,
+        zero_shared: bool,
+        mut source: impl FnMut(usize) -> Option<usize>,
+    ) -> Result<(), i32> {
+        let (len, ptr) = (self.len, self.ptr);
+        let zero = if zero_shared { shared_zero_page(page) } else { None };
+        let t = unsafe { mach_task_self() };
+        for k in 0..len / page {
+            let src = match source(k) {
+                Some(va) => va as u64,
+                None => match zero {
+                    Some(z) => z as u64,
+                    // A private zero page, already there: nothing to remap.
+                    None => continue,
+                },
+            };
+            let (mut at, mut cur, mut max) = ((ptr as usize + k * page) as u64, 0i32, 0i32);
+            // SAFETY: Mach VM call on our own task; `at` is a page of our own reservation, `src`
+            // a page of the title's memory (or the shared zero page).
+            let r = unsafe {
+                mach_vm_remap(
+                    t,
+                    &mut at,
+                    page as u64,
+                    0,
+                    VM_FLAGS_OVERWRITE,
+                    t,
+                    src,
+                    0,
+                    &mut cur,
+                    &mut max,
+                    VM_INHERIT_SHARE,
+                )
+            };
+            if r != 0 {
+                return Err(r);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PageMap {
+    fn drop(&mut self) {
+        // SAFETY: the range came from `Region::new`/the Mach calls in `new`.
+        unsafe { mach_vm_deallocate(mach_task_self(), self.ptr as u64, self.len as u64) };
+    }
+}

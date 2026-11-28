@@ -9,7 +9,7 @@ use crate::backend::{
     ComputeBackend, Heaps, RootArgs, MAX_DISPATCH_GROUPS, MAX_DRAW_COUNTS, MAX_DRAW_INSTANCES,
     MAX_GROUPS_PER_DIMENSION, clamp_dispatch_groups, clamp_draw_counts,
 };
-use crate::metal::{Buffer, Metal, Queue};
+use crate::metal::{Buffer, Metal, PIPE_NAMES, Queue};
 use crate::resources::*;
 use objc2::Message;
 use objc2::rc::Retained;
@@ -1448,14 +1448,35 @@ impl GraphicsBackend for Metal {
     }
 
     fn name_render_pipeline(&self, p: &RenderPipeline, name: &str) {
-        if self.trace_fails || crate::frametime::passes() {
-            let key = Retained::as_ptr(&p.pso) as *const u8 as usize;
-            self.pipe_names.borrow_mut().insert(key, name.to_string());
+        // Kept whatever the tracing says, as `name_pipeline` keeps a compute pipeline's: a command
+        // buffer the GPU hangs on names its encoders' shaders only if the encoder's label exists,
+        // and the label is built from these names (the run of 28 November, `20261128-124403-HrpixB`,
+        // hung in a 60-draw render pass and could only name it because VICTORY_TRACE_GPU_FAILS
+        // happened to be set). Bounded: pipelines are made and let go in thousands a minute, and
+        // a stale name would pass for a newer pipeline's at a reused address.
+        let key = Retained::as_ptr(&p.pso) as *const u8 as usize;
+        let mut names = self.pipe_names.borrow_mut();
+        if names.len() >= PIPE_NAMES {
+            names.clear();
         }
+        names.insert(key, name.to_string());
     }
 
 
     fn submit_passes(&self, queue: &Queue, work: &PassSubmission<'_, Self>) -> Result<(), SubmitFailure> {
+        let result = self.encode_submission(queue, work);
+        // A submission that never committed still owes its fence signals: nothing else raises
+        // them, and a title thread waiting on one (SetEventOnCompletion, a queue wait, a poll of
+        // the value) would wait for good -- which is the title's watchdog ending the run.
+        pay_dropped_if_uncommitted(work, &result);
+        result
+    }
+}
+
+impl Metal {
+    /// [`Self::submit_passes`]' encoding and commit, without the payment a submission that never
+    /// commits takes (the caller does that once, so every early return here is covered).
+    fn encode_submission(&self, queue: &Queue, work: &PassSubmission<'_, Self>) -> Result<(), SubmitFailure> {
         // `VICTORY_TRACE_FRAME`: the frame line's per command buffer and per pass times. The sample
         // buffer is made per command buffer, so its cost belongs to the trace, not the run.
         let tracing = crate::frametime::enabled();
@@ -1478,6 +1499,30 @@ impl GraphicsBackend for Metal {
             self.trace_args.borrow_mut().clear();
         }
         let mut cb = self.new_command_buffer(queue).map_err(SubmitFailure::uncommitted)?;
+        // `VICTORY_METAL_RESIDENCY_SETS=cb`: the title memory this command buffer's encoders name,
+        // and nothing else, is what it asks Metal to keep reachable. A blit cannot name its own
+        // ranges, so without this a fill into title memory is one Metal may leave unreached when
+        // the pools are in no queue's set.
+        let pool_cb_set = if self.pool_cb_sets && self.sets_on() {
+            match self.dev.newResidencySetWithDescriptor_error(&MTLResidencySetDescriptor::new()) {
+                Ok(set) => {
+                    let set = crate::gfx::track_residency_set(set);
+                    for b in work.buffers() {
+                        set.addAllocation(ProtocolObject::from_ref(&*b.buf));
+                    }
+                    crate::metal::residency_timed("pool_cb_commit", Some(&set), || set.commit());
+                    cb.useResidencySet(&set);
+                    self.count(|c| c.added += 1);
+                    Some(set)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e.localizedDescription(), "no residency set for a command buffer's pools");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut label = String::new();
         if self.trace_fails {
@@ -1578,11 +1623,21 @@ impl GraphicsBackend for Metal {
                 self.commit_piece(queue, &cb, owed, piece, tinfo, frame_commit(tracing, &encode_start, &enc));
                 first = n + 1;
                 cb = match self.next_piece(queue, work.waits, &mut attached_heaps, Some((&**event, piece))) {
-                    Ok(cb) => cb,
+                    Ok(cb) => {
+                        // Each piece reaches the same title memory: it asks for it as the whole
+                        // submission would (`VICTORY_METAL_RESIDENCY_SETS=cb`).
+                        if let Some(set) = &pool_cb_set {
+                            cb.useResidencySet(set);
+                        }
+                        cb
+                    }
                     Err(e) => {
                         // The current piece never started: every pass from `first` on was lost,
-                        // and the earlier pieces did commit.
+                        // and the earlier pieces did commit. The signals were to go in the last
+                        // piece, which no longer exists: pay them now, as a dropped submission's
+                        // are, so no title wait is left forever.
                         refused.extend(first..work.passes.len());
+                        pay_dropped(work);
                         return Err(SubmitFailure {
                             committed: true,
                             refused,
@@ -1627,6 +1682,9 @@ impl GraphicsBackend for Metal {
         let frame = frame_commit(tracing, &encode_start, &enc);
         let failed = block2::RcBlock::new(move |done: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            // The command buffer's residency set must outlive it: this block does, and drops it
+            // when Metal reports the buffer done.
+            let _pool_cb_set = &pool_cb_set;
             // SAFETY: Metal passes the command buffer that completed.
             let done = unsafe { done.as_ref() };
             // What the GPU spent on it, for the window's HUD (a completed buffer always has both
@@ -2113,6 +2171,33 @@ unsafe impl Send for Owed {}
 // buffers and signal the events, even if the timeout and completion threads both call recover.
 unsafe impl Sync for Owed {}
 
+/// A submission that never committed still owes its fence signals: nothing else raises them, a
+/// title thread waiting on one waits for good, and the title's own watchdog then ends the run
+/// (run `20261128-124403-HrpixB`: a GPU hang at t=393 s, `a held fence signal was not queued` at
+/// 17:50:41, then no present after 17:51:22 and the fail-fast 30 s later). Its value writes are the
+/// caller's: it holds their ranges and pays only a lost submission's (`native/host.rs`).
+fn pay_dropped(work: &PassSubmission<'_, Metal>) -> usize {
+    let events: Vec<_> = work.signals.iter().map(|(f, v)| (f.0.clone(), *v)).collect();
+    let signals = events.len();
+    if signals == 0 {
+        return 0;
+    }
+    Owed::of(events, &[], signals).recover();
+    signals
+}
+
+/// [`pay_dropped`] for a submission's result: pays only one that never committed (one that did
+/// raises its own signals when the GPU finishes the command buffer, or when it fails).
+fn pay_dropped_if_uncommitted(
+    work: &PassSubmission<'_, Metal>,
+    result: &Result<(), SubmitFailure>,
+) -> usize {
+    match result {
+        Err(f) if !f.committed => pay_dropped(work),
+        _ => 0,
+    }
+}
+
 /// A command buffer committed and not yet reported on by Metal: its queue, when, what it owes.
 struct Flight {
     serial: u64,
@@ -2528,7 +2613,7 @@ fn encoder_info_label(info: &ProtocolObject<dyn MTLCommandBufferEncoderInfo>) ->
 /// One `tracing::warn!` line for a failed command buffer: its label and each encoder's state.
 fn trace_failure(cb: &ProtocolObject<dyn MTLCommandBuffer>, e: &objc2_foundation::NSError) {
     let label = cb.label().map(|l| l.to_string()).unwrap_or_default();
-    let mut encoders = String::new();
+    let mut states: Vec<(&'static str, String)> = Vec::new();
     // SAFETY: the key is a Metal constant; the value is an NSArray of encoder infos.
     let infos = e.userInfo().objectForKey(unsafe { MTLCommandBufferEncoderInfoErrorKey });
     if let Some(infos) = infos {
@@ -2543,14 +2628,33 @@ fn trace_failure(cb: &ProtocolObject<dyn MTLCommandBuffer>, e: &objc2_foundation
                 MTLCommandEncoderErrorState::Affected => "Affected",
                 _ => "Unknown",
             };
-            encoders.push_str(&format!(" | [{st}] {}", encoder_info_label(&i)));
+            states.push((st, encoder_info_label(&i)));
         }
+    }
+    // The encoder the GPU stopped in, on its own line: a hang or a fault names the pass it came
+    // from and, through its label, the shaders of that pass (a 34-pass world command buffer cannot
+    // be read for that).
+    if let Some((st, label)) = encoder_faulted(&states) {
+        tracing::warn!("metal: the GPU {:?} in this encoder: [{st}] {label}", e.localizedDescription());
+    }
+    let mut encoders = String::new();
+    for (st, label) in &states {
+        encoders.push_str(&format!(" | [{st}] {label}"));
     }
     tracing::warn!(
         "metal: command buffer failed: [{label}] now={:.3} ({}){encoders}",
         crate::metal::since_start(),
         e.localizedDescription()
     );
+}
+
+/// The encoder Metal marks `Faulted` -- the pass a hang or a fault came from -- if there is one.
+/// Pure, for testing: the states come from `MTLCommandBufferEncoderInfo` (`trace_failure`).
+fn encoder_faulted<'a>(states: &'a [(&'static str, String)]) -> Option<(&'static str, &'a str)> {
+    states
+        .iter()
+        .find(|(st, _)| *st == "Faulted")
+        .map(|(st, label)| (*st, label.as_str()))
 }
 
 /// Caps an encoder label.
@@ -2855,7 +2959,9 @@ impl Metal {
             e.updateFence(f);
             started.set(true);
         }
-        if self.trace_fails {
+        {
+            // Always labelled: a command buffer the GPU fails or hangs on names its encoders, and
+            // an encoder's label has to exist when it is made (see `name_render_pipeline`).
             let fills = ops.iter().filter(|o| matches!(o, BlitOp::Fill { .. })).count();
             e.setLabel(Some(&self.cap_label(format!("blit: {} ops ({fills} fills)", ops.len()))));
         }
@@ -3258,7 +3364,9 @@ impl Metal {
             e.updateFence(f);
             started.set(true);
         }
-        if self.trace_fails {
+        {
+            // Always labelled (see `name_render_pipeline`): a compute pass the GPU hangs on names
+            // its shaders in the failure line.
             let names = self.pipe_names.borrow();
             let mut l = String::from("compute: ");
             for d in dispatches.iter().filter(|d| runs(d)) {
@@ -3270,11 +3378,12 @@ impl Metal {
                 match d.indirect {
                     // The record as title memory holds it now: what earlier command buffers
                     // left there, not what this one's earlier passes will write.
-                    Some((_, title)) => {
+                    Some((_, title)) if self.trace_fails => {
                         // SAFETY: the caller resolved three words at `title` inside the live buffer.
                         let w: [u32; 3] = unsafe { title.cast::<[u32; 3]>().read_unaligned() };
                         l.push_str(&format!(" indirect{w:?}; "));
                     }
+                    Some(_) => l.push_str(" indirect; "),
                     None => l.push_str(&format!(" {}x{}x{}; ", d.groups[0], d.groups[1], d.groups[2])),
                 }
             }
@@ -3827,8 +3936,9 @@ impl Metal {
             e.updateFence_afterStages(f, MTLRenderStages::Fragment);
             started.set(true);
         }
-        if self.trace_fails {
-            // Each distinct pipeline once, with its draw count: names the pass's shaders.
+        {
+            // Each distinct pipeline once, with its draw count: names the pass's shaders, always
+            // (see `name_render_pipeline`).
             let names = self.pipe_names.borrow();
             let mut seen: Vec<(usize, usize)> = Vec::new();
             for d in &rp.draws {
@@ -4053,6 +4163,122 @@ mod owed_tests {
     use super::*;
     use crate::backend::ComputeBackend;
     use crate::mem::{Region, page_size};
+
+    /// A submission that never committed raises its fence signals from the CPU: nothing else
+    /// would, and a title thread waiting on that value waits for good (the watchdog then ends the
+    /// run). A submission that did commit leaves them to the GPU, and a later, lower signal does
+    /// not lower a fence.
+    #[test]
+    fn a_submission_that_never_commits_still_raises_its_fences() {
+        let m = Metal::new().unwrap();
+        let fence = m.create_fence(0).unwrap();
+        let signals = [(&fence, 9)];
+        let dropped = PassSubmission { waits: &[], passes: &[], signals: &signals };
+        assert_eq!(pay_dropped(&dropped), 1);
+        assert_eq!(m.completed(&fence), 9, "a dropped submission's signal is paid");
+
+        let never = Err(SubmitFailure::uncommitted("dropped behind a stuck GPU"));
+        assert_eq!(pay_dropped_if_uncommitted(&dropped, &never), 1);
+        // A submission that committed signals its fence when the GPU finishes it: nothing paid here.
+        let committed = Err(SubmitFailure { committed: true, refused: vec![0], error: "a pass".into() });
+        let later = [(&fence, 12)];
+        let work = PassSubmission { waits: &[], passes: &[], signals: &later };
+        assert_eq!(pay_dropped_if_uncommitted(&work, &committed), 0);
+        assert_eq!(m.completed(&fence), 9);
+        // A lower value than a fence already reached does not lower it.
+        let lower = [(&fence, 4)];
+        pay_dropped(&PassSubmission { waits: &[], passes: &[], signals: &lower });
+        assert_eq!(m.completed(&fence), 9);
+    }
+
+    /// `VICTORY_METAL_RESIDENCY_SETS=cb`: a command buffer gets a residency set of its own holding
+    /// the title memory its encoders name, and a blit's fill (which no encoder can name) still
+    /// lands. That is what `heap` mode lacks: a queue-joined pool set was the only thing that made
+    /// a blit's ranges reachable.
+    #[test]
+    fn a_command_buffer_set_carries_the_pools_a_blit_reaches() {
+        let m = Metal::new().unwrap();
+        if !m.sets_on() {
+            return;
+        }
+        let m = m.with_pool_cb_sets(true);
+        let region = Region::new(page_size(), None).unwrap();
+        let buf = m.wrap_title_memory(region.ptr, region.len).unwrap();
+        let q = m.create_queue().unwrap();
+        let fence = m.create_fence(0).unwrap();
+        let before = m.residency_counts().added;
+        let passes = [Pass::Blit(vec![BlitOp::Fill {
+            dst: (&buf, region.ptr as *const u8),
+            len: 8,
+            value: 0xA5,
+        }])];
+        m.submit_passes(&q, &PassSubmission { waits: &[], passes: &passes, signals: &[(&fence, 1)] })
+            .expect("a blit into title memory");
+        assert!(m.wait(&fence, 1, 5000), "the fill ran");
+        // SAFETY: these eight bytes are inside the live region, and the GPU is done with it.
+        assert_eq!(unsafe { std::slice::from_raw_parts(region.ptr, 8) }, [0xA5; 8]);
+        assert!(
+            m.residency_counts().added > before,
+            "the command buffer asked for the pool ranges it reaches as a set of its own"
+        );
+        assert!(!m.pool_sets, "the pools are not joined to a queue in this mode");
+    }
+
+    /// The encoder Metal marks `Faulted` is named on its own: the pass a hang came from, and,
+    /// through its label, the shaders of that pass. A command buffer's other encoders are only
+    /// listed after it.
+    #[test]
+    fn the_faulted_encoder_is_the_one_named() {
+        let pairs: Vec<(&'static str, String)> = vec![
+            ("Completed", "compute: compute 1111".to_string()),
+            ("Faulted", "render: 60 draws; vertex 08173be1abe64830 pixel 81b8ed12e81f0652 x16".to_string()),
+            ("Affected", "render: 8 draws".to_string()),
+        ];
+        let (state, label) = encoder_faulted(&pairs).expect("one faulted encoder");
+        assert_eq!(state, "Faulted");
+        assert!(label.contains("08173be1abe64830"), "{label}");
+        assert_eq!(encoder_faulted(&[("Completed", "x".to_string())]), None);
+        assert_eq!(encoder_faulted(&[]), None);
+    }
+
+    /// A pipeline's name is kept without the failure trace, since a command buffer that hangs can
+    /// only name its shaders if the encoder's label was built from them when it was encoded.
+    #[test]
+    fn pipeline_names_are_kept_without_the_failure_trace() {
+        let m = Metal::new().unwrap();
+        assert!(!m.trace_fails, "the failure trace is off unless its switch is set");
+        let library = m.dev.newLibraryWithSource_options_error(
+            &objc2_foundation::NSString::from_str(
+                "using namespace metal;\n\
+                 vertex float4 v(uint i [[vertex_id]]) { return float4(0); }\n\
+                 fragment float4 f() { return float4(0); }\n",
+            ),
+            None,
+        ).expect("compile the test shaders");
+        let v = library.newFunctionWithName(&objc2_foundation::NSString::from_str("v")).unwrap();
+        let f = library.newFunctionWithName(&objc2_foundation::NSString::from_str("f")).unwrap();
+        let d = MTLRenderPipelineDescriptor::new();
+        d.setVertexFunction(Some(&v));
+        d.setFragmentFunction(Some(&f));
+        // SAFETY: the descriptor has a colour attachment at index 0.
+        unsafe { d.colorAttachments().objectAtIndexedSubscript(0) }.setPixelFormat(MTLPixelFormat::RGBA8Unorm);
+        let p = RenderPipeline {
+            pso: m.dev.newRenderPipelineStateWithDescriptor_error(&d).unwrap(),
+            depth: None,
+            cull: MTLCullMode::None,
+            raster: Raster::default(),
+            stencil: false,
+            mesh: None,
+            vs_static: None,
+            ps_static: None,
+        };
+        m.name_render_pipeline(&p, "vertex 0123456789abcdef pixel fedcba9876543210");
+        let key = Retained::as_ptr(&p.pso) as *const u8 as usize;
+        assert_eq!(
+            m.pipe_names.borrow().get(&key).map(String::as_str),
+            Some("vertex 0123456789abcdef pixel fedcba9876543210")
+        );
+    }
 
     /// A submission of more passes than a command buffer takes goes in several, in order: every
     /// pass runs and the fence is signalled once the last has.

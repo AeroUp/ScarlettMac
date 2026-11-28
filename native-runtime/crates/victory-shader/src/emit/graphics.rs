@@ -1693,8 +1693,9 @@ mod tests {
 
         let mut missing_high = code;
         missing_high[6] = 0xBF80_0000; // s_nop 0: s21 is an unknown hardware input
-        let err = mesh(&missing_high).unwrap_err();
-        assert!(err.to_string().contains("high dword is not known"), "{err}");
+        // Above a mesh program's user data a register reads 0 (docs/native-host.md, "Lane
+        // masks joined with data"): the pair's high dword is then known, not refused.
+        mesh(&missing_high).unwrap();
 
         // Wave32 needs only s20, even when s21 has no value on the data edge.
         let mut wave32 = missing_high;

@@ -281,6 +281,9 @@ pub struct Binding {
     pub heap: bool,
     /// The pipeline's name (its shaders' hashes), for diagnostics.
     pub name: Rc<str>,
+    /// Attributes a vertex shader reads through the input assembler (0: none, its vertices are
+    /// its own to fetch, e.g. from views), for diagnostics (`VICTORY_TRACE_GPU_VERTICES`).
+    pub vertex_attributes: usize,
 }
 
 /// A root view's kind.
@@ -330,6 +333,7 @@ impl Binding {
             heap_typed_buffers: typed_buffers && shader.heap,
             heap: shader.heap,
             name: "".into(),
+            vertex_attributes: 0,
         }
     }
 
@@ -984,6 +988,13 @@ impl<B: GraphicsBackend> NativeList<B> {
         &self.state.compute_root
     }
 
+    /// The binding of the compute pipeline the next dispatch takes (for traces: with it a
+    /// dispatch's tables are read to the entries its shader names, as a draw's are).
+    #[cfg(target_os = "macos")]
+    pub(super) fn compute_binding(&self) -> Option<&Binding> {
+        self.state.compute.as_ref().and_then(|pso| pso.binding.as_ref())
+    }
+
     /// `Reset`: forget everything recorded and set.
     pub fn reset(&mut self) {
         *self = NativeList::default();
@@ -1370,6 +1381,11 @@ impl<B: GraphicsBackend> NativeList<B> {
     /// `OMSetBlendFactor`.
     pub fn set_blend_factor(&mut self, factor: [f32; 4]) {
         self.state.draw.blend_factor = factor;
+    }
+
+    /// The descriptor heaps the list has bound (`SetDescriptorHeaps`): resource, sampler.
+    pub fn bound_heaps(&self) -> (Option<Rc<NativeHeap<B>>>, Option<Rc<NativeHeap<B>>>) {
+        (self.state.heaps.0.clone(), self.state.heaps.1.clone())
     }
 
     /// `IASetVertexBuffers` for one slot: the title address of its data and the view's size (the

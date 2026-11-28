@@ -513,6 +513,55 @@ fn a_texture_just_uploaded_is_not_read_again_until_it_changes() {
     assert!((1..=4).any(|_| submit().1 == 3), "a write is seen");
 }
 
+/// The report tells the streamer's textures from the title's own: a copy the host texture was
+/// filled from after a *host* writer touched its memory (DirectStorage staging, a file read, XG
+/// tiling) is counted as streamed — the duplicate copy's side of the report — and split by whether
+/// it was detiled or unpacked from BCPack/BCn; a texture only the title itself stored is not
+/// streamed, and a later title store after an upload takes the mark away.
+#[test]
+fn the_report_counts_the_streamers_textures_apart() {
+    let Some((mut t, pool)) = budget_title() else { return };
+    let base = pool.va(0) as usize;
+    let at = (0x4000 - base % 0x4000) % 0x4000;
+    // 4KB_S tiling: the console's swizzle, so a detile (not a format decode); whole pages.
+    let streamed = crate::resource::test_texture_at(pool.va(at), (128, 128), 1, 28, Swizzle::SW_4KB_S.0, 0);
+    let info = crate::resource::texture_info(streamed).unwrap();
+    let (key, size, memory) = (streamed as usize, info.size, info.memory as usize);
+    t.texture_created(key, info);
+    assert!(t.realize(key));
+    // BC1, also 4KB_S: unpacked rather than detiled.
+    let bc = crate::resource::test_texture_at(pool.va(at + 0x10000), (128, 128), 1, 71, Swizzle::SW_4KB_S.0, 0);
+    let bc_info = crate::resource::texture_info(bc).unwrap();
+    let (bc_key, bc_memory, bc_size) = (bc as usize, bc_info.memory as usize, bc_info.size);
+    t.texture_created(bc_key, bc_info);
+    assert!(t.realize(bc_key));
+    // The title's own store: not streamed.
+    pool.write(at, &vec![0x31u8; size]);
+    // The streamer's: the host writer that DirectStorage uses records it.
+    crate::title_memory_write(memory, size);
+    pool.write(at, &vec![0x41u8; size]);
+    crate::title_memory_write(bc_memory, bc_size);
+    pool.write(at + 0x10000, &vec![0x42u8; bc_size]);
+
+    t.sync_textures();
+    let r = t.decoded_report();
+    assert_eq!(r.streamed, (size + bc_size) as u64, "both of the streamer's copies");
+    assert_eq!(r.streamed_detiled, size as u64, "the tiled RGBA8 one, detiled only");
+    assert_eq!(r.streamed_bcpack, bc_size as u64, "the BC1 one came out of the decoder");
+    assert_eq!(r.under_copies, (size + bc_size) as u64, "and the title still holds both");
+    assert!(
+        crate::native::textures::streamed_bytes() >= (size + bc_size) as u64,
+        "the streamed total counts the bytes"
+    );
+
+    // The title stores into the tiled one: its next upload is the title's own bytes, not streamed.
+    pool.write(at, &vec![0x51u8; size]);
+    t.sync_textures();
+    let r = t.decoded_report();
+    assert_eq!(r.streamed, bc_size as u64, "only the BC one is still the streamer's");
+    assert_eq!(r.streamed_detiled, 0);
+}
+
 /// A block-compressed texture: 16 bytes a 4x4 block, in the console's layout, detiled as blocks.
 #[test]
 fn a_block_compressed_title_texture_is_detiled_as_blocks() {
@@ -3396,6 +3445,85 @@ fn a_released_copy_puts_its_console_bytes_back() {
     assert_eq!(read_mip(key, 0, 128, 128), texels, "and the texture still samples the same");
 }
 
+/// A texture whose bytes a host writer put in title memory (DirectStorage staging: the streamer's)
+/// gives its title pages back as soon as the decoded copy holds them, rather than after the idle
+/// threshold: that is the duplicate copy removed, the console's bytes no longer resident beside the
+/// Metal texture. The title's own store does not release anything, a read back through the fault
+/// path keeps the copy in title memory from then on, and a texture with an unreadable page (fine
+/// mips still to come) waits for the rest.
+#[test]
+fn a_streamed_copy_gives_its_pages_back_as_soon_as_it_is_uploaded() {
+    assert!(victory_platform::faults::install(|_| false), "the page-restore helper starts");
+    let Some((mut t, pool)) = budget_title() else { return };
+    let base = pool.va(0) as usize;
+    let at = (0x4000 - base % 0x4000) % 0x4000;
+    let tiled = |at: usize, byte: u8| {
+        let res = crate::resource::test_texture_at(pool.va(at), (128, 128), 1, 28, Swizzle::SW_4KB_S.0, 0);
+        let info = crate::resource::texture_info(res).unwrap();
+        pool.write(at, &vec![byte; info.size]);
+        (res as usize, info)
+    };
+    let (key, info) = tiled(at, 0x61);
+    let (size, memory) = (info.size, info.memory as usize);
+    t.texture_created(key, info);
+    assert!(t.realize(key));
+    t.set_release_streamed(true);
+    // The title's own store: not the streamer's, so nothing goes back.
+    t.sync_textures();
+    assert!(!t.is_released(key), "the title's own bytes stay");
+    // A DirectStorage read's, as it records before it writes: released at the upload.
+    crate::title_memory_write(memory, size);
+    pool.write(at, &vec![0x62u8; size]);
+    t.sync_textures();
+    assert!(t.is_released(key), "a streamed copy's pages go at its upload");
+    assert_eq!(t.released_bytes(), size as u64);
+    assert!(crate::native::textures::streamed_released_bytes() >= size as u64, "and the line counts them");
+    // The title reads them back: the fault path puts the console bytes back, and the copy stays
+    // home from then on (a texture the CPU reads is not one to fault every frame).
+    assert!(t.restore_at(memory + 0x40), "the fault helper finds it");
+    assert_eq!(t.released_bytes(), 0);
+    assert_eq!(pool.read::<u8>(at, 4), [0x62; 4], "the bytes are the streamed ones");
+    t.sync_textures();
+    assert!(!t.is_released(key), "read back once, it is no longer given away");
+    assert_eq!(t.decoded_report().streamed, 0, "and it is the title's now");
+
+    // The streamer filling a texture it had finished (a second DirectStorage read into its pages):
+    // the release is undone, the new bytes are read, and the copy is not released again — each
+    // would only fault back into another whole re-read.
+    let at2 = at + 0x20000;
+    let (again_key, again) = tiled(at2, 0x64);
+    let (again_memory, again_size) = (again.memory as usize, again.size);
+    t.texture_created(again_key, again);
+    assert!(t.realize(again_key));
+    crate::title_memory_write(again_memory, again_size);
+    pool.write(at2, &vec![0x65u8; again_size]);
+    t.sync_textures();
+    assert!(t.is_released(again_key), "released at its first streamed upload");
+    // A page of it opens for the streamer's next write.
+    assert!(crate::title_memory_write(again_memory + 0x2000, 0x1000), "the released page opens");
+    pool.write(at2 + 0x2000, &vec![0x66u8; 0x1000]);
+    t.sync_textures();
+    assert!(!t.is_released(again_key), "the release is dropped for a fresh read");
+    assert!(crate::native::textures::streamed_released_undone().0 >= 1, "and the line counts it");
+    assert_eq!(pool.read::<u8>(at2 + 0x2000, 4), [0x66; 4]);
+    crate::title_memory_write(again_memory, again_size);
+    pool.write(at2, &vec![0x67u8; again_size]);
+    t.sync_textures();
+    assert!(!t.is_released(again_key), "a texture the streamer fills twice stays home");
+
+    // A texture with a page that cannot be read (fine mips still to stream) is not released yet.
+    let (partial_key, partial) = tiled(at + 0x10000, 0x63);
+    let emissary = partial.memory as usize;
+    t.texture_created(partial_key, partial);
+    assert!(t.realize(partial_key));
+    crate::title_memory_write(emissary, 0x1000);
+    // Unmap one page of it, as a texture streamed in mips has.
+    let pools = t.host.memory();
+    pools.unmapped(emissary + 0x4000, 0x4000);
+    t.sync_textures();
+    assert!(!t.is_released(partial_key), "a partly readable streamed texture waits");
+}
+
 /// A host writer into a released copy's title pages (DirectStorage staging, a file read, XG
 /// tiling) opens the pages before writing, and the copy is dropped as stale at the next sync:
 /// the new bytes are read, not the old ones re-tiled from the texture.
@@ -3490,6 +3618,41 @@ fn over_budget_a_released_copy_is_put_back_and_given_up() {
     assert_eq!(t.budget.live, 0);
     assert!(!victory_platform::faults::all_out(memory, size), "its pages are writable again");
     assert_eq!(pool.read::<u8>(at, size), console, "the title's pages hold the bytes, byte for byte");
+}
+
+/// Over budget, an idle copy's pages are not given back: the budget's check takes that same copy,
+/// and taking a released one means re-tiling it from the GPU into the title's pages first, work
+/// thrown away at once. Back under the limit, the idle copy is released as before.
+#[test]
+fn over_budget_nothing_is_released() {
+    assert!(victory_platform::faults::install(|_| false), "the page helper starts");
+    let Some((mut t, pool)) = budget_title() else { return };
+    t.set_release_pages(true);
+    let base = pool.va(0) as usize;
+    let at = (0x4000 - base % 0x4000) % 0x4000;
+    let res = crate::resource::test_texture_at(pool.va(at), (128, 128), 1, 28, Swizzle::SW_4KB_S.0, 0);
+    let info = crate::resource::texture_info(res).unwrap();
+    let (key, size) = (res as usize, info.size);
+    pool.write(at, &vec![0x31u8; size]);
+    t.texture_created(key, info);
+    assert!(t.realize(key));
+    t.sync_textures();
+    let now = std::time::Instant::now();
+    t.set_texture_last_used_at(key, now - std::time::Duration::from_secs(3600));
+
+    // One byte under what the copy holds: over the budget, so nothing is released.
+    let live = t.budget.live;
+    t.set_texture_budget(live - 1);
+    t.release_quiescent_at(crate::queue::presented(), now);
+    assert!(!t.is_released(key), "over budget, the idle copy is the budget's to take");
+    assert_eq!(t.released_bytes(), 0);
+
+    // At the limit (not over it), the same idle copy gives its pages back.
+    t.set_texture_budget(live);
+    t.release_quiescent_at(crate::queue::presented(), now);
+    assert!(t.is_released(key), "under budget, an idle copy is released");
+    assert_eq!(t.released_bytes(), size as u64);
+    assert!(t.restore_pages(key), "and put back, so the pool's pages are open again");
 }
 
 /// A copy a submission named is taken only after everything colder: giving it up made the next
@@ -3602,17 +3765,28 @@ fn decoded_copies_are_reported_by_reason() {
     let (mips, mips_bytes) = make(&mut t, 0x8000, (32, 32), 2, 28, Swizzle::LINEAR.0, 0, 0x33);
     let (converted, converted_bytes) = make(&mut t, 0xC000, (16, 16), 1, 115, Swizzle::LINEAR.0, 0, 0x44);
     let (depth, depth_bytes) = make(&mut t, 0xE000, (16, 16), 1, 45, Swizzle::LINEAR.0, 2, 0x55);
+    // 71 = BC1_UNORM, tiled: one image, and a mip chain (the typical streamed asset).
+    let (bc_one, bc_one_bytes) = make(&mut t, 0x10000, (64, 64), 1, 71, Swizzle::SW_4KB_S.0, 0, 0x66);
+    let (bc_mips, bc_mips_bytes) = make(&mut t, 0x14000, (64, 64), 2, 71, Swizzle::SW_4KB_S.0, 0, 0x77);
     let r = t.decoded_report();
     assert!(t.is_zero_copy(free) && !t.is_zero_copy(tiled));
+    assert!(!t.is_zero_copy(depth) && !t.is_zero_copy(bc_one) && !t.is_zero_copy(bc_mips));
     assert_eq!(r.zero_copy, free_bytes, "the linear sampled one is not copied");
     assert_eq!(r.zero_copy_copies, 1);
     assert_eq!(r.tiled, tiled_bytes, "a tiled layout needs a copy");
-    assert_eq!(r.layout, mips_bytes, "a mip chain needs a copy");
+    assert_eq!(r.layout, mips_bytes, "an uncompressed mip chain needs a copy: {r:?}");
     assert_eq!(r.format, converted_bytes, "a converted format needs a copy");
     assert_eq!(r.depth, depth_bytes, "depth needs a copy");
+    assert_eq!(r.bcpack, bc_one_bytes, "a block-compressed image is counted once: {r:?}");
+    assert_eq!(r.bc_mipped, bc_mips_bytes, "a tiled BC mip chain is BC, not layout or tiling: {r:?}");
     assert_eq!(r.written, depth_bytes, "of them, the depth target is GPU-written");
-    assert_eq!(r.other + r.alignment + r.multisampled + r.bcpack, 0);
-    assert_eq!(r.zero_copy + r.tiled + r.layout + r.format + r.depth, free_bytes + tiled_bytes + mips_bytes + converted_bytes + depth_bytes);
+    assert_eq!(r.other + r.alignment + r.multisampled, 0);
+    // Each copy under one reason: the reasons are the decoded pool, byte for byte.
+    let reasons = r.tiled + r.bcpack + r.bc_mipped + r.format + r.depth + r.layout + r.multisampled + r.alignment + r.other;
+    assert_eq!(reasons, t.budget_live_for_test(), "the reasons add up to the decoded pool: {r:?}");
+    assert_eq!(r.reasons().iter().sum::<u64>(), r.decoded);
+    assert_eq!(r.decoded, t.budget_live_for_test());
+    assert_eq!(r.written + r.sampled_only, r.decoded, "written or sampled only, nothing else");
 }
 
 /// Of the decoded pool, the bytes a block permutation could turn into the title's own pages: a
@@ -3892,4 +4066,46 @@ fn unmapped_leading_mips_are_trimmed_until_mapped() {
     assert!(!std::rc::Rc::ptr_eq(&small, &full), "texture upgraded after fine mips mapped");
     assert_eq!(t.host.dropped_count(key), info.dropped_levels());
     assert!(!t.trimmed.contains(&key));
+}
+
+/// A frame's texture work is bounded by time, not only by bytes: once the frame has spent its
+/// budget, the next submission's textures are listed but not read, they stay listed (changed, or
+/// never uploaded), and the next frame's submission reads them. Without that, a frame that lists
+/// more than a frame can read was 38 s of submit on 28 November, past the title's 30 s watchdog.
+#[test]
+fn a_frames_texture_work_is_bounded_in_wall_time() {
+    use std::time::Duration;
+    let _aging = AGING.lock().unwrap_or_else(|e| e.into_inner());
+    const N: usize = 12;
+    const STRIDE: usize = 64 << 10;
+    let Some(pool) = pool(9151, N * STRIDE / page_size() + 1) else { return };
+    let keys: Vec<usize> = (0..N)
+        .map(|i| crate::resource::test_texture_at(pool.va(i * STRIDE), (64, 64), 1, 28, Swizzle::LINEAR.0, 0) as usize)
+        .collect();
+    let frame = 4242;
+    with_title(|t| {
+        for &k in &keys {
+            assert!(t.realize(k));
+        }
+        // A frame with no budget left reads nothing, and the listing is put back.
+        assert_eq!(t.texture_work_left_at(frame, Duration::ZERO), Duration::ZERO);
+        let jobs = t.sync_jobs_within(None);
+        assert!(jobs.iter().any(|j| keys.contains(&j.key)), "the textures are listed");
+        t.defer_reads(jobs);
+        assert!(keys.iter().all(|&k| t.uploads_of(k) == 0), "nothing read past the budget");
+        // The next frame starts with its own budget, and reads them: a deferral delays a
+        // texture, it does not drop it.
+        let left = t.texture_work_left_at(frame + 1, Duration::from_secs(60));
+        assert!(!left.is_zero(), "a new frame has the whole budget");
+        t.sync_dirty_without_probe_deadline();
+        assert!(keys.iter().all(|&k| t.uploads_of(k) == 1), "deferred textures read next frame");
+        // Spending the whole frame's budget closes it, at once.
+        t.spent_texture_work(Duration::from_secs(60));
+        assert!(t.texture_work_left_at(frame + 1, Duration::from_secs(60)).is_zero());
+    });
+    with_title(|t| {
+        for &k in &keys {
+            t.texture_released(k);
+        }
+    });
 }

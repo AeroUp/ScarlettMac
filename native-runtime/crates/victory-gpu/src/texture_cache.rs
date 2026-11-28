@@ -22,6 +22,10 @@
 //! compressed and is stored as it is; any other level is deflated when that makes it smaller.
 //! Each level says which, so a reader takes both.
 //!
+//! **Mapping.** A reader maps the entry (`mmap`) instead of reading it: a level stored as it is
+//! is uploaded straight out of the file's clean, file-backed pages (no copy in the heap, and
+//! nothing for the OS to swap), and only a deflated one is inflated into memory.
+//!
 //! The folder is the user's cache folder (`use_dir`, from `native_run`), never the repo.
 
 use std::collections::BTreeMap;
@@ -32,7 +36,8 @@ use std::time::SystemTime;
 
 use victory_formats::texture::{Dimension, Layout};
 
-use crate::native::textures::Level;
+use crate::mmap::Map;
+use crate::native::textures::{Level, Texels};
 
 /// The entry format, and what a decode depends on: raise it when `Layout::detile` or `to_host`
 /// changes the bytes a decode makes, or when the entry's layout changes (a bump invalidates every
@@ -145,7 +150,7 @@ impl Cache {
         skip: usize,
     ) -> Option<Vec<Level>> {
         let path = self.path_for(&key(layout, dimension, format, hash));
-        let found = std::fs::read(&path).ok().and_then(|bytes| unseal_decode(&bytes)).and_then(|stored| {
+        let found = Map::open(&path).ok().and_then(|map| unseal_decode(&map)).and_then(|stored| {
             let needed: Vec<usize> = needed_levels(layout, uploaded_mips, skip);
             let have: Vec<&Level> = stored
                 .values()
@@ -184,10 +189,8 @@ impl Cache {
             return;
         }
         // What the entry holds already (a partial decode of the same bytes), plus what is new.
-        let mut stored: BTreeMap<(usize, usize), Level> = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| unseal_decode(&bytes))
-            .unwrap_or_default();
+        let mut stored: BTreeMap<(usize, usize), Level> =
+            Map::open(&path).ok().and_then(|map| unseal_decode(&map)).unwrap_or_default();
         let before = stored.len();
         for level in levels {
             stored.insert((level.mip, level.slice), level.clone());
@@ -348,12 +351,13 @@ fn key(layout: &Layout, dimension: Dimension, format: u32, hash: &blake3::Hash) 
 fn encode(levels: &BTreeMap<(usize, usize), Level>, block_compressed: bool) -> Vec<u8> {
     let mut out = (levels.len() as u32).to_le_bytes().to_vec();
     for level in levels.values() {
+        let texels = level.texels.as_slice();
         let compressed = (!block_compressed)
-            .then(|| miniz_oxide::deflate::compress_to_vec_zlib(&level.texels, 1))
-            .filter(|z| z.len() + 1 < level.texels.len());
+            .then(|| miniz_oxide::deflate::compress_to_vec_zlib(texels, 1))
+            .filter(|z| z.len() + 1 < texels.len());
         let (flag, bytes) = match &compressed {
             Some(z) => (1u8, z.as_slice()),
-            None => (0u8, level.texels.as_slice()),
+            None => (0u8, texels),
         };
         for v in [level.mip as u32, level.slice as u32, level.row as u32, level.slice_pitch as u32, bytes.len() as u32] {
             out.extend(v.to_le_bytes());
@@ -364,14 +368,17 @@ fn encode(levels: &BTreeMap<(usize, usize), Level>, block_compressed: bool) -> V
     out
 }
 
+/// An entry's levels, out of its mapping: a level stored as it is stays a window of the file (its
+/// upload reads the page cache), a deflated one is inflated.
 #[allow(clippy::type_complexity)]
-fn unseal_decode(bytes: &[u8]) -> Option<BTreeMap<(usize, usize), Level>> {
+fn unseal_decode(map: &Arc<Map>) -> Option<BTreeMap<(usize, usize), Level>> {
+    let bytes = map.bytes();
     let rest = bytes.strip_prefix(MAGIC.as_slice())?;
     let (sum, body) = rest.split_at_checked(32)?;
-    (blake3::hash(body).as_bytes() == sum).then(|| decode(body)).flatten()
+    (blake3::hash(body).as_bytes() == sum).then(|| decode(map, body)).flatten()
 }
 
-fn decode(mut body: &[u8]) -> Option<BTreeMap<(usize, usize), Level>> {
+fn decode(map: &Arc<Map>, mut body: &[u8]) -> Option<BTreeMap<(usize, usize), Level>> {
     fn word(body: &mut &[u8]) -> Option<u32> {
         let (head, rest) = body.split_at_checked(4)?;
         *body = rest;
@@ -390,8 +397,11 @@ fn decode(mut body: &[u8]) -> Option<BTreeMap<(usize, usize), Level>> {
         let (bytes, rest) = body.split_at_checked(len)?;
         body = rest;
         let texels = match flag {
-            0 => bytes.to_vec(),
-            1 => miniz_oxide::inflate::decompress_to_vec_zlib(bytes).ok()?,
+            0 => {
+                let at = map.offset_of(bytes);
+                Texels::Mapped(map.clone(), at..at + len)
+            }
+            1 => Texels::Owned(miniz_oxide::inflate::decompress_to_vec_zlib(bytes).ok()?),
             _ => return None,
         };
         levels.insert((mip, slice), Level { mip, slice, texels, row, slice_pitch });
@@ -465,8 +475,8 @@ mod tests {
 
     fn levels() -> Vec<Level> {
         vec![
-            Level { mip: 0, slice: 0, texels: vec![7; 256], row: 16, slice_pitch: 256 },
-            Level { mip: 1, slice: 0, texels: vec![9; 64], row: 8, slice_pitch: 64 },
+            Level { mip: 0, slice: 0, texels: vec![7; 256].into(), row: 16, slice_pitch: 256 },
+            Level { mip: 1, slice: 0, texels: vec![9; 64].into(), row: 8, slice_pitch: 64 },
         ]
     }
 
@@ -484,7 +494,7 @@ mod tests {
         assert_eq!(back.len(), 2);
         for (a, b) in back.iter().zip(&made) {
             assert_eq!((a.mip, a.slice, a.row, a.slice_pitch), (b.mip, b.slice, b.row, b.slice_pitch));
-            assert_eq!(a.texels, b.texels);
+            assert_eq!(a.texels.as_slice(), b.texels.as_slice());
         }
         // A level already uploaded is not needed, and not asked of the entry.
         assert_eq!(cache.levels(&l, Dimension::Tex2d, 71, &hash, 1, 0).unwrap().len(), 1);
@@ -512,6 +522,37 @@ mod tests {
         cache.store(&l, Dimension::Tex2d, 71, &hash, &made[1..]);
         assert_eq!(walk(dir.path()).len(), 1, "one file for one content and layout");
         assert_eq!(cache.levels(&l, Dimension::Tex2d, 71, &hash, 0, 0).unwrap().len(), 2);
+    }
+
+    /// A cache hit reads the entry's file rather than the heap where it can: a block-compressed
+    /// level is stored as it is, so it is served as a window of the mapping (the upload reads the
+    /// file's clean pages, no second copy of it in memory), while a level deflated to fit is
+    /// inflated into the heap. Either way the bytes that come back are the ones stored.
+    #[test]
+    fn a_cache_hit_uploads_a_block_compressed_level_from_the_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 0).unwrap();
+        let l = layout();
+        let hash = blake3::hash(b"tiled bytes");
+        // Both levels of the layout, so a hit finds every level it needs.
+        let big = |mip: usize, byte: u8| Level {
+            mip,
+            slice: 0,
+            texels: vec![byte; 4096].into(),
+            row: 64,
+            slice_pitch: 4064,
+        };
+        let levels = |byte: u8| vec![big(0, byte + 1), big(1, byte)];
+        // 71 is BC1: block-compressed, kept as stored.
+        cache.store(&l, Dimension::Tex2d, 71, &hash, &levels(0x5a));
+        let back = cache.levels(&l, Dimension::Tex2d, 71, &hash, 0, 0).expect("stored");
+        assert!(back.iter().all(|level| level.texels.is_mapped()), "a BC level comes from the mapping");
+        assert_eq!(back[0].texels.as_slice(), vec![0x5b; 4096].as_slice());
+        // 28 is RGBA8: deflated, so a hit inflates it into the heap instead.
+        cache.store(&l, Dimension::Tex2d, 28, &hash, &levels(0x33));
+        let back = cache.levels(&l, Dimension::Tex2d, 28, &hash, 0, 0).expect("stored");
+        assert!(back.iter().all(|level| !level.texels.is_mapped()), "a deflated level is inflated");
+        assert_eq!(back[1].texels.as_slice(), vec![0x33; 4096].as_slice());
     }
 
     /// The folder is capped: a prune keeps the most recently used entries and deletes the rest,

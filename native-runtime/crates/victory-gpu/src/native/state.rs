@@ -480,14 +480,16 @@ impl Graphics {
             .unwrap_or(0)
     }
 
-    /// Each stream's stride: where its elements end (four-byte aligned), or the stride of the view
-    /// the draw bound when that is longer.
+    /// Each stream's stride: the `StrideInBytes` of the view the draw bound, or where its elements
+    /// end (four-byte aligned) for a slot the draw bound no view for.
     ///
     /// D3D12's input assembler steps by the view's `StrideInBytes` (a guessed pipeline's comes from
-    /// the draw, a described one's from its `IASetVertexBuffers`): a stream that pads after its last
-    /// element still reads the vertex the title meant. A bound stride past `MAX_STRIDE` is not one
-    /// the assembler takes (2048 bytes; a stale binding of ours can hold anything): the layout's
-    /// elements decide then.
+    /// the draw, a described one's from its `IASetVertexBuffers`), never by the input layout: a
+    /// stream that pads after its last element still reads the vertex the title meant, and one
+    /// whose layout declares elements past its end reads those the way D3D12 does, out of the
+    /// vertex's bytes. A bound stride past `MAX_STRIDE` is not one the assembler takes (2048
+    /// bytes; a stale binding of ours can hold anything): the layout's elements decide then, as
+    /// they do for a slot the draw bound no stride for.
     fn apply_strides(&self, streams: &mut [VertexStream]) {
         const MAX_STRIDE: u32 = 4096;
         for s in streams {
@@ -499,19 +501,22 @@ impl Graphics {
                 .or_else(|| self.bound_strides.get(s.slot))
                 .filter(|&&b| b <= MAX_STRIDE);
             if let Some(&bound) = bound {
-                if self.guess.is_none() && env_set!("VICTORY_TRACE_STRIDES") && (bound as usize) > s.stride {
+                let stepped = if self.guess.as_ref().is_some_and(|g| g.rect) {
+                    3 * bound as usize
+                } else if bound == 0 {
+                    s.stride
+                } else {
+                    bound as usize
+                };
+                if self.guess.is_none() && env_set!("VICTORY_TRACE_STRIDES") && stepped != s.stride {
                     tracing::info!(
                         slot = s.slot,
                         layout_end = s.stride,
-                        stride = bound,
-                        "a stage-in stream steps by the view's stride, longer than its layout's elements"
+                        stride = stepped,
+                        "a stage-in stream steps by the view's stride, not its layout's elements"
                     );
                 }
-                s.stride = if self.guess.as_ref().is_some_and(|g| g.rect) {
-                    3 * bound as usize
-                } else {
-                    s.stride.max(bound as usize)
-                };
+                s.stride = stepped;
             }
         }
     }
@@ -1093,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn a_described_stream_steps_by_the_view_stride_when_it_pads() {
+    fn a_described_stream_steps_by_the_view_stride() {
         // POSITION float3 at 0 and COLOR float2 at 12: the layout's elements end at 20 bytes.
         let names = [c"POSITION", c"COLOR"];
         let el = |n: usize, format: u32, offset: u32| {
@@ -1119,8 +1124,10 @@ mod tests {
         assert_eq!(layout(&g), [20]);
         // The title's view pads each vertex to 32 bytes: the input assembler steps by its stride.
         assert_eq!(layout(&g.clone().with_strides(&[32])), [32]);
-        // A view shorter than the layout's elements cannot be what the shader reads: the end wins.
-        assert_eq!(layout(&g.clone().with_strides(&[16])), [20]);
+        // A view shorter than the layout's elements is still what the assembler steps by: the
+        // elements past it read out of the vertex, as D3D12 reads them, and the vertices the
+        // shader's own elements name stay where the title put them.
+        assert_eq!(layout(&g.clone().with_strides(&[16])), [16]);
         // Neither a null view's 0 nor a stride past the assembler's limit changes the stream.
         assert_eq!(layout(&g.with_strides(&[0xFFFF_FFFF])), [20]);
     }

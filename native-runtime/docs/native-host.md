@@ -320,7 +320,7 @@ The window carries a dark translucent panel in its top-left corner with live fig
 - **Header**: `ScarlettMac Native | <Series S or X> | <short commit>`, the window title's own text (`window::window_title`).
 - **FPS and frame time**: presents counted by `victory_metal::pace::presented` (called for every frame `present.rs` shows, hidden or not) in the last panel interval; the last gap, the mean of the recent ones, and the last 40 gaps as blocks (taller for slower frames). The ring of 480 gaps lives in atomics, so reading it never waits on the title.
 - **RAM**: `phys_footprint` (`victory_platform::mem::footprint`), resident bytes from `task_info(TASK_BASIC_INFO)`, and the title's own committed title memory of its console budget (`xmem_physical::title_memory`: every pool, by the console's CPU and GRAPHICS kinds) — the host's copies are the TEX line.
-- **The memory line** (every 10 s, `memory-report` in `apps/victory/src/native_run.rs`): the same parts apart, so a footprint that outgrows the machine can be attributed: `memory: title committed .. MiB (.. CPU, .. GRAPHICS in .. pools, capped at .. MiB), host texture copies .. of .. MiB, Metal allocated .. MiB, DXIL .. MiB, footprint .. MiB (other .. MiB), .. copies waiting for a submission to name them; the title is told .. MiB of title memory (Series S: .. + ..)`. A second line follows it, on the texture path: `texture copies: what is sampled from title memory, and what the decoded copies are needed for ...` with `zero_copy_mib`, `zero_copy_textures`, `decoded_mib` and the decoded pool by reason — `tiled_mib` (the console's swizzle), `bcpack_mib` (block-compressed: BCPack's output, unpacked by the title), `format_mib` (a conversion on upload), `depth_mib`, `layout_mib` (a mip chain, slice stack or volume), `multisampled_mib`, `alignment_mib`, `other_mib` (a copy Metal could have taken) — and `gpu_written_mib`, the part of the pool the GPU writes (`Title::decoded_report`). It also reports `in_place_mib`/`in_place_copies`: of the decoded copies,
+- **The memory line** (every 10 s, `memory-report` in `apps/victory/src/native_run.rs`): the same parts apart, so a footprint that outgrows the machine can be attributed: `memory: title committed .. MiB (.. CPU, .. GRAPHICS in .. pools, capped at .. MiB), host texture copies .. of .. MiB, Metal allocated .. MiB, DXIL .. MiB, footprint .. MiB (other .. MiB), .. copies waiting for a submission to name them; the title is told .. MiB of title memory (Series S: .. + ..)`. A second line follows it, on the texture path: `texture copies: what is sampled from title memory, and what the decoded copies are needed for ...` with `zero_copy_mib`, `zero_copy_textures`, `decoded_mib` and the decoded pool by reason, one per copy, in MiB that add up to `decoded_mib` (checked in this order): `depth_mib`, `multisampled_mib`, `bcpack_mib` (block-compressed, one image), `bc_mipped_mib` (block-compressed with mips, slices or a volume: a streamed asset), `layout_mib` (an uncompressed mip chain, slice stack or volume), `format_mib` (a conversion on upload), `tiled_mib` (uncompressed, the console's swizzle), `alignment_mib`, `other_mib` (a copy Metal could have taken) — and `gpu_written_mib`/`sampled_only_mib`, the pool the GPU writes and the rest (`Title::decoded_report`). Until 29 November a BC copy was counted under `bcpack` on top of its reason (twice for one image) and a mipped one under `layout`, so the reasons passed `decoded_mib`. It also reports `in_place_mib`/`in_place_copies`: of the decoded copies,
   the bytes a *block permutation* could turn into the title's own pages with no second resident
   copy — a tiled, uncompressed, single-mip, sampled-only texture whose linear image fits the bytes
   the title allocated (`Title::in_place_bytes`). Block-compressed ones cannot be aliased (above);
@@ -534,6 +534,39 @@ Each of the 91 has `mix` pairs. `mesh_tests::a_half_kept_by_mixlo_and_replaced_b
 (`victory-gpu`) draws the shape on Metal in both orders: a pixel program that interpolates with
 `v0`/`v1` and then packs (1.0, 0.5) into `v1` draws (1.0, 0.5, 1.0, 1.0).
 
+## Barycentrics read as data (`SV_Barycentrics`)
+
+Pixel programs that read their barycentric VGPRs (`SPI_PS_INPUT_ADDR` bits 0-6) as numbers, not
+only through `v_interp_p1/p2_f32`, were refused as "barycentrics read directly": 420 of the 31,575
+containers this Mac's runs kept, 26 of them bound in a run to the world.
+
+Such a read is now a channel of a DXIL `SV_Barycentrics` input (`Lower::barycentric`): kind 28,
+system value 23, a float3 with no register (as DXC declares it), with `ShaderFlags` bit 22 and
+`SFI0` 0x20000. `v_interp` makes P0 + i·(P1 - P0) + j·(P2 - P0), so i and j are vertices 1 and
+2's weights, `SV_Barycentrics.y` and `.z`. **Guess:** the console's P0 is the first vertex in D3D
+order, as `interp` assumes for the provoking vertex; strips' odd triangles are unchecked.
+
+- PERSP_CENTER is mode 2 and LINEAR_CENTER `noperspective` (4), one element each. Centroid and
+  sample pairs stay refused ("centroid or sample barycentrics read directly"): the Metal Shader
+  Converter refuses those modes (IRError 8). The pull model stays refused too.
+- Measured (Metal Shader Converter 4.0.3, macOS 27.2.1, M4 Max): without an `SV_Position` input,
+  its perspective barycentrics are each vertex's screen weight over its w, not normalised. With
+  one declared, read or not, they are right, so the translation adds it.
+- Lazily, like the image dwords: `lower_graphics` loads them only on a pass after one refused for
+  them, so every program that translated before has the same output. Loading them on the first
+  pass changed 734 such programs: a guarded write or a `v_fma_mix` keeps one in lanes or a half
+  that nothing reads.
+
+Corpus (28 November): 484 more programs translate (29,587 to 30,071, 28 bound in the world run),
+no output changed, no regression. 412 were refused for this; 72 for a reason a later pass met
+after a join with a barycentric gave up (44 "a descriptor read only as data", 28 a lane mask
+"not written by a scalar ALU instruction"). The other 8 now refuse as "the first half of an
+interpolation". All 420 read PERSP_CENTER. Tests: `gfx_refusal_tests::raw_barycentrics_*`,
+`emit::tests::indexed_move_initializes_an_input_before_its_first_use`, and
+`mesh_tests::raw_barycentrics_are_the_weights_of_vertices_1_and_2` (`victory-gpu`), which draws a
+triangle with w 1.5, 2 and 0.75 on Metal and checks every pixel's i and j (it fails without the
+`SV_Position`).
+
 ## LDS instructions addressed by M0
 
 `ds_append`, `ds_consume`, `ds_read_addtid_b32` and `ds_write_addtid_b32` have no address
@@ -615,10 +648,11 @@ Off by default, environment variables of the host process. The native host's swi
 - `VICTORY_TRACE_GPU_FAILS=1`: on macOS, command buffers are made with encoder execution status, labelled (`q<queue> #<serial> t=<secs> waits signals passes`) and so are their encoders (compute: pipeline name and group counts per dispatch; render: draw count; blit: op count), and a command buffer the GPU fails is logged with `tracing::warn!` (timestamped, up to 200) with each encoder's label and state (Completed, Pending, Faulted, Affected). An encoder info's `-label` is declared non-null but can return nil (a failed buffer whose encoder never began); it is now read through the runtime and logged as empty text, where objc2's generated call asserted and panicked out of the completion block (a windowed Series S run died that way, exit 139, 27 November). Without it the first 20 failures are an untimestamped `eprintln!`. It also logs each command buffer that took over 1 s to complete (`metal: slow command buffer`, with GPU and kernel times) and, at each submission, each one still in flight after 3 s (`metal: command buffer in flight`, once each; both capped at 100 lines). While work stays held (the `work held for a wait that does not hold` warning, when nothing is submitted any more) the same in-flight report is made, with a line giving how many command buffers are in flight, each queue whose order event is behind the command buffers encoded with it (`queue <title queue> at <reached> of <encoded>`), and the commands dropped so far at unmapped memory. Each piece of a split submission (`VICTORY_PASSES_PER_BUFFER`) is traced as a whole command buffer is, under its own passes: `metal: slow piece` or `metal: failed piece` with its time, and it is in the in-flight report (a time-out carries no encoder states, so the labels are what names the pass). An indirect dispatch's label shows its record as title memory held it at encode time (`indirect[x, y, z]`), and every indirect draw goes through the gate so that the lines above can end with what the GPU read (`gpu read <compute shader, or "draw k" / "mesh draw k" by place in the pass> [counts]`, zeros for a gate that has not run yet); `metal: a record past the cap ran clamped` names the first four records of each pipeline or draw that asked for more than the gate runs (see "ExecuteIndirect on the native host").
 - `VICTORY_TRACE_WRITES=1`: on macOS, a warning for every bottom-of-pipe value write a list records (value, address, whether a pool holds it, the list), every memory-value wait (address, comparison, reference, the list) and every `ExecuteCommandLists` (queue and lists): which list of which queue owes the word another queue waits for. About 100 lines a world frame. Without it, a value write the host has to drop (its address in no mapped pool, or not preparable) is still a warning, once per page (`native host drops a value write`): a queue may wait for that word for good.
 - `VICTORY_TRACE_FREED=1`: names host and GPU uses of title memory the title's allocator has freed. `XMemAllocDefault` notes every range it hands out, `XMemFreeDefault` the ones it takes back (the block header holds the size), and `Host::resolve` — the way every host and GPU use of title memory begins — logs any range it is asked to map that overlaps a freed span, with both ranges and a serial. Part-reuse leaves the freed ends beside it. What it cannot see: the title can hook the allocator, and pools it sub-allocates inside a live block free and reuse memory without any call here; this names the `XMem`-granularity class only (#339: a host copy or a GPU write into freed memory, one candidate for the corrupted pool links).
+- `VICTORY_TRACE_RELEASE_RSS=1`: on macOS, each batch of decoded copies whose title pages are released logs `released_mib` beside the process's resident size and `phys_footprint` change across it: whether releasing frees RAM (see "Title pages given back to the OS").
 - `VICTORY_TRACE_TEXTURE_SYNC=1`: on macOS, once a second, what keeping the host's textures in step with title memory cost (`texture sync in the last ..`): the submissions that read textures (batches), the textures and MiB they read (those never uploaded before, those read and found unchanged, the blank ones, those with memory that could not be read at once), the time under the host's lock (probing the hot textures, with how many of them went to be read whole; probing the blank ones; uploading), the time the submitting thread spent reading without the lock and the reading threads' time by step (read, hash, detile), and the placements that replaced another at their address (with how many of those had been at that address before). See "Texture sync without the host's lock". It also logs the texture budget once a second (`host texture copies: ..`; "A byte budget on host texture copies" below), whose size `VICTORY_METAL_TEXTURE_BUDGET_MB=<n>` sets (off unless set), and with `VICTORY_TEXTURE_IDLE_FRAMES=<n>` how many frames a copy may go unused before it is given up (off unless set); the line separates what a heap entry shows from what the budget may take, and how much of that only entries no work in flight can read yet (the copies a bindless title leaves pinned). The figures are logged with the budget off too.
 - `VICTORY_TRACE_RECORD_WRITERS=1`: for indirect mesh draws that leave no pixels. At each present with indirect mesh executions it logs `mesh records` (the frame's records, and how many had a group count of 0 in title memory as the execution was recorded; a culling pass that ran fills them on the GPU later, one that was dropped never does), `mesh record buffer holder` for each compute program, `ran` or `dropped`, whose descriptor tables hold a record buffer for unordered access (with the records in those buffers and the textures it reads), and `texture read by a mesh record buffer holder` with the compute programs that hold that texture for unordered access. Tables are read 64 entries deep whatever their length, so a holder is a candidate writer, not a proven one; the texture keys are those of the `VICTORY_TRACE_TARGETS` frame line. With compute shader hashes for a value (`VICTORY_TRACE_RECORD_WRITERS=<hash>[,<hash>...]`) the records watched are those of these shaders' indirect dispatches instead of the mesh records: the holders are then the candidate writers of their group counts.
 - `VICTORY_WATCH_TITLE=<address>[,<length>]`: on macOS, follows one range of title memory (a title page, 64 KiB, unless a length is given; both in hex) while a run goes, for a page a GPU write may have corrupted. Every unordered-access buffer view that covers it is logged once per distinct view when the view is mirrored into a descriptor heap (`descriptor heap`) and when a compute dispatch is recorded (`compute <hash>`, the dispatch's shader), and so is a buffer copy, clear or texture download that writes it, and a GPU-written texture copied back into title memory; those are the candidate writers. The bytes are then read at each present (from the pool mappings, or the process's memory where no pool holds them) and a change since the last present logs `the watched title memory changed since the last present` with the offset, how many bytes differ and the old and new bytes around the first difference (the first 64 changes). Off unless set; reads title memory only. Until a run shows one, the fault at `image+0x55e56f8` is in the title's crash path (a null field of a stack object in its WER file writer), so the page to watch is the title-memory page whose value the title misread earlier, not the image address.
-- `VICTORY_TRACE_PASSES=<dir>,<skip>,<presents>`: on macOS, an ordered trace of a few world frames, to find the first pass that writes nothing (`dive-lighting` research). It lets `<skip>` world presents go by (a present after 500 or more recorded draws; default 100), then for the next `<presents>` presents (default 4) writes to stderr, in the order each submission queues the work: `PASS exec=<submission> q=<queue> li=<list> ci=<command> kind=<draw|mesh|dispatch[..]|clear-rtv|copy-region|...> out=<"ran" or the drop reason> sh=[shaders] tg=[targets] rd=[shader-resource views] wr=[unordered-access views] none=<empty table entries> topo=<topology>` for every draw, dispatch, clear and copy recorded in the window; `PASSFAIL exec= li= ci= err=` for each of those the submission could not prepare (dropped then, e.g. "not in a mapped pool"); `PASSSUB exec= li= ci= changed=[entries]` when a noted draw's or dispatch's table entries read differently at submission than when it was recorded (the title rewrote them in between; D3D12 reads them at execution); `PASSUPLOAD` for each upload of title memory over a render-target or unordered-access texture; and, at the window's last present, `PASSTEX key= fmt= WxH at= nonzero=` (plus range, mean and non-finite counts for DXGI 2, 10, 24, 26) for every texture the window named, with a `.ppm` of each in `<dir>` (only formats the dump decodes; arrays skipped). A texture is written `<key>:f<DXGI format>:<W>x<H>@<title address>`, a shader-resource view of a buffer the host knows `<key>:buf`, of a null resource `null:f<format>:dim<view dimension>` (from its view description; it reads as zeros), and of anything else without a host texture `<key>:untracked`; a view of placed memory that is a buffer `placed:buf`, and of any other dimension that is not a texture `placed-dim<dimension>`; tables are read to the entries the shader's binding names (24 for a dropped draw or a dispatch, and never past the heap). Set `VICTORY_TRACE_PASSES_DUMP_EACH=1` to dump at every present of the window. The listing also writes a constant-buffer view as `cbv:<address>+<size>:<dwords>` and a placed buffer view as `placed:buf:<address>+<size>:desc[<first ten description words>]:<dwords>` (the first 512 bytes, in hex), and `<slot>.past-heap=<n>@<index>/<heap size>` when a table names entries past its heap; `PASSTEX` reads a 3D texture whole and adds `depth=`, `slices_nonzero=` and `distinct_texels=`, and for a DXGI 2 texture of 16 texels or fewer, `values=[...]`. Constant buffers and buffer contents are game data too. Off unless set: the switch is read once, at the first present; outside the window every hook is one relaxed load of a flag and nothing is formatted or kept, and the commands are prepared once either way (a failure is reported from the submission's own preparation). Images hold game content: keep `<dir>` outside the repository. Runs that end with exit code 134 a minute or two after the window were seen with and without the trace on the same build (the dive's runs and the untraced c2comb run), so that abort is not the trace's.
+- `VICTORY_TRACE_PASSES=<dir>,<skip>,<presents>[,<frame>]`: on macOS, an ordered trace of a few world frames, to find the first pass that writes nothing (`dive-lighting` research). It lets `<skip>` world presents go by (a present after 500 or more recorded draws; default 100), then for the next `<presents>` presents (default 4) writes to stderr, in the order each submission queues the work: `PASS exec=<submission> q=<queue> li=<list> ci=<command> kind=<draw|mesh|dispatch[..]|clear-rtv|copy-region|...> out=<"ran" or the drop reason> sh=[shaders] tg=[targets] rd=[shader-resource views] wr=[unordered-access views] none=<empty table entries> topo=<topology>` for every draw, dispatch, clear and copy recorded in the window; `PASSFAIL exec= li= ci= err=` for each of those the submission could not prepare (dropped then, e.g. "not in a mapped pool"); `PASSSUB exec= li= ci= changed=[entries]` when a noted draw's or dispatch's table entries read differently at submission than when it was recorded (the title rewrote them in between; D3D12 reads them at execution); `PASSUPLOAD` for each upload of title memory over a render-target or unordered-access texture; and, at the window's last present, `PASSTEX key= fmt= WxH at= nonzero=` (plus range, mean and non-finite counts for DXGI 2, 10, 24, 26) for every texture the window named, with a `.ppm` of each in `<dir>` (only formats the dump decodes; arrays skipped). A texture is written `<key>:f<DXGI format>:<W>x<H>@<title address>`, a shader-resource view of a buffer the host knows `<key>:buf`, of a null resource `null:f<format>:dim<view dimension>` (from its view description; it reads as zeros), and of anything else without a host texture `<key>:untracked`; a view of placed memory that is a buffer `placed:buf`, and of any other dimension that is not a texture `placed-dim<dimension>`; tables are read to the entries the shader's binding names (24 for a dropped draw or dispatch, or for a table it names none of, and never past the heap) -- for a dispatch too, through the compute pipeline's binding, so a bindless compute's shadow maps and depth show in its `rd=`. Set `VICTORY_TRACE_PASSES_DUMP_EACH=1` to dump at every present of the window. The listing also writes a constant-buffer view as `cbv:<address>+<size>:<dwords>` and a placed buffer view as `placed:buf:<address>+<size>:desc[<first ten description words>]:<dwords>` (the first 512 bytes, in hex), and `<slot>.past-heap=<n>@<index>/<heap size>` when a table names entries past its heap; `PASSTEX` reads a 3D texture whole and adds `depth=`, `slices_nonzero=` and `distinct_texels=`, and for a DXGI 2 texture of 16 texels or fewer, `values=[...]`. `<frame>` (optional) arms the window at the first present at or after that title frame number instead of after `<skip>` world presents: a script aiming at the world cannot count presents (the loading screens present thousands of times and which of their presents has 500 draws depends on how the machine scheduled the load), while the title's frame number repeats from run to run. Constant buffers and buffer contents are game data too. Off unless set: the switch is read once, at the first present; outside the window every hook is one relaxed load of a flag and nothing is formatted or kept, and the commands are prepared once either way (a failure is reported from the submission's own preparation). Images hold game content: keep `<dir>` outside the repository. Runs that end with exit code 134 a minute or two after the window were seen with and without the trace on the same build (the dive's runs and the untraced c2comb run), so that abort is not the trace's.
 - `VICTORY_TRACE_DISPATCH_FLAGS=1`: logs the first `DispatchX` with each flags value (`DispatchX: the first dispatch with these flags`, with its counts and the bits the host does not know: it knows 0x20 and 0x8000, see "`DispatchX` with thread counts"), and the first `ExecuteIndirect` of a type-105 dispatch, whose counts run as group counts; and the first three indirect dispatches of each pipeline (`an indirect dispatch`: its shader, the record's title address and the three words title memory holds there as the call is recorded, which is before the GPU writes them).
 - `VICTORY_TRACE_IMPORTS=1`: the same for every import bound to a host function (name and DLL), whatever the result. Slow (millions of lines in a title's startup).
 - `VICTORY_KEYS=<seconds>:<key>,...`: on macOS, scripted input next to the live keyboard (below; the two are OR-ed): each key is held for 0.2 s that long after `GameInputCreate`, and drives the stand-in pad (`Enter` is A, `Esc` is B, `Tab` is Menu; letters, digits, `Tab`, `Back` and the arrows as in the README). **Live keys (windowed run):** `window.rs` takes key-down and key-up events (macOS key codes, not characters; Cmd shortcuts are left to AppKit) and calls `gameinput::set_live_key` with the Windows virtual key; the macOS `Source::keys` returns them with the scripted ones, so the stand-in pad (`FALLBACK_BUTTONS`, shared with Windows) sees both. Held while down, released on key-up or when the window loses key status. Enter or Space is A, Esc or Backspace B, X, Y, arrows the D-pad, W/A/S/D the left stick (I/J/K/L the right, F/H the stick clicks), Tab Menu, V View, Q/E the shoulders, Z/C the triggers. **Controllers (windowed run):** while the window has key status, each loop turn `window.rs` reads one `GCController`: `GCController.current` (the one used last) when it has an `extendedGamepad`, otherwise the first connected one that has. The Xbox layout comes from the extended gamepad's elements, so a DualShock 4 (`GCDualShockGamepad`) and a DualSense (`GCDualSenseGamepad`) are read like an Xbox pad: Cross/Circle/Square/Triangle are A/B/X/Y, Options (`buttonMenu`) is Menu, Share (`buttonOptions`) is View. Those two profiles also have `touchpadButton` (found with `respondsToSelector:`), and its click is View too: our choice, as PlayStation titles use the touchpad for back and map. The PS button (`buttonHome`) is not mapped: GameInput has no Guide bit for titles, and macOS keeps it for its own overlay. `gameinput::set_live_pad` OR-s the result with the keyboard's stand-in pad. Each change of controller is logged once at info level (`controller: drives the pad`, with `vendor`, `category` such as `DualShock 4`, and `touchpad`). The window tests read a software gamepad (`+[GCController controllerWithExtendedGamepad]`, whose elements take `setValue:`), so the read path is checked without hardware. A headless run needs it to get past the title's engagement screen (below); `VICTORY_KEYS=$(seq 4 2 80 | sed 's/$/:Enter/' | paste -sd, -)` presses Enter every 2 s.
@@ -628,17 +662,20 @@ Off by default, environment variables of the host process. The native host's swi
 - `VICTORY_FIND_QWORD=<hex>,<hex>,...` (with `VICTORY_DUMP_THREADS`): logs every aligned qword of resident readable memory equal to one of the values, with the 0x100 bytes from it; `@<hex>` stands for the qword at that address. Finds heap objects by their method table (data only).
 - `VICTORY_PEEK=rva,rva,...`: at the first-chance exception log, prints those qwords of the faulting image (an operand above `0x10000000` is an absolute address), the qwords `rcx` points at, and a call chain by the unwind tables. Use it with `llvm-objdump` on the title (analysis only). The fail-fast store is recognised on its own and always logs its call chain; `VICTORY_TRACE_TITLE_WATCHDOG=1` adds the title watchdog's active scopes there (below).
 - `VICTORY_TRACE_TITLE_WATCHDOG=1`: on macOS, when the first-chance fault is the title's fail-fast store (`mov dword ptr [0], 0x4d8bd421`), reads the watchdog's scope table and logs each active scope's entry (group, nesting depth) with how much older than the newest active one it was entered. The table is the build's (`image+0x6844a20`: 64 entries of 0x48 bytes, a count at +4 and up to eight entry times at +8); a count past eight is refused as another layout. Off unless set. The fault is a watchdog timeout, not a null pointer the host returned (see "Computed pixel and vertex buffers").
+- `VICTORY_STALL_SECONDS=<n>`: on macOS, a thread of its own reads, once a second and without taking the host's lock, the clocks the title's watchdog watches: the presented frames (an atomic), the watchdog's global heartbeat (`image+0x971fb8`: 30 s without a change fails the process) and its scope table (`image+0x6844a20`: 300 s after a scope a title thread entered and did not leave), each entry's age against the same QPC the entries are stamped with. When one has not moved for `n` seconds it logs `a title clock the watchdog reads has stopped` with the frame, how long each has been still, the oldest scope, and the host phase in progress (`host_phase`, `phase_for`, `host_thread`); the first three reports of a stall also write every title thread's host call and call chain (the `VICTORY_DUMP_THREADS` dump, on demand). A heartbeat word that never changes in the run is named as such, so another build's layout cannot pass for a stopped heartbeat. Off unless set: when frames or a title thread grow past the watchdog's limits, this says which of its two clocks ran rather than leaving it to guesswork.
 - `VICTORY_TRACE_OWNERS=1`: who made the memory that comes to share pages (#15), logged as a warning (`VICTORY_TRACE_OWNERS`) with both owners when it happens: a new physical page view over another view (`xmem_physical::record`; the mapping paths unmap first, so it should not happen), page numbers past the 25 bits Grand Theft Auto VI keeps (`number >> 4` in 21 bits) with the page whose number it would rebuild, `VirtualFree(MEM_DECOMMIT)` of a range that still shows views (`MEM_RELEASE` gives them back first, `forget_physical`), and a title mapping (`XMemMapPhysicalPages`, its scatter form, the GPU's `map_alias`) outside every region `VirtualAlloc` or `XMemVirtualAlloc` made (macOS only). Each owner is the public call that made it (the outermost one on that thread), its range, pool id and page index, a sequence number and the title's return address from the host call (`image+offset`; on other threads 0 or a stale one). Off, nothing is recorded: the cost is one read of the switch per view, allocation and free.
 - `VICTORY_DEBUG_PS=id`: every float export of every translated pixel program writes one colour, the low three bytes (red, green, blue) of the 32-bit FNV-1a hash of its console code (a container's `ACCC` code piece, as the `disasm` example takes it; alpha 1), so a target dump (`VICTORY_TRACE_PASSES`, `VICTORY_DUMP_TARGETS`) says which pixel program drew each pixel, and through the pass trace which draw and vertex program. Read a UNORM target (an sRGB one stores the encoded value). A translation switch (`VICTORY_DEBUG_PS` is in the cache key). Made for the world's G-buffer shards ("World geometry drawn as shards (open)"): the 40 pixel programs of the traced G-buffer draws have 40 different colours.
 - `VICTORY_TRACE_ROOT_SPAN[=<bytes>]`: root SRVs and UAVs whose title range stops being linear in its pool within `<bytes>` (default 1 MiB) of the root address (#15). A shader that does not read title memory reaches a root view through a view pair (`addr::root_view`): the pool from the mapping holding the address on, linearly, so past that mapping's end it reads and writes whatever the pool has next, not the title's next mapping. At each draw and dispatch a translated shader's root views are measured (`addr::linear_run`: following mappings that start where the last ended, in the same pool, at the next pool offset), and each one whose run is shorter is logged once per pipeline, root parameter and mapping (`a root view's range leaves its pool's linear run`, at most 2000): the pipeline's shader hashes, SRV or UAV, the dispatch's groups, the run, the first mapping, the mapping the title has where the run ends (`title_next`) and the title address of the pool bytes a pair view reaches there (`pool_next_is`). Root views of programs that read title memory (`through = "table"`) look each access up in the page table; they are logged too. Heap buffer views need no check: a range that is not linear in one pool wraps the title's own mapping instead (see "Heap buffer views not linear in one pool"). Off, the cost is one read of the switch per draw and dispatch. Run of 2026-11-26 (M5 Pro, Series S, crash at frame 2682): the 117 lines are all vertex shaders' root SRVs (root parameter 3, vertex fetch), and 30 of them do have a next title page elsewhere in pool 10 (pages mapped in descending pool order); no dispatch and no root UAV has a run under 1 MiB, so root views do not write the empty BVH nodes over other resources. Those vertex shaders read the wrong vertices past the first page, though: vertex and pixel programs now read root SRVs and UAVs through the page table (`root_memory` in `emit::lower`, with `zero_copy_memory`), one lookup per access, so they log as `through = "table"`; compute programs keep the views (no short run seen there). Tested by `a_vertex_root_view_follows_the_title_across_pages_apart_in_the_pool` (`addr_tests.rs`): a triangle whose first vertex ends one 64 KiB page and whose others start the next one, mapped elsewhere in the pool, was not drawn. Limit: the table has 64 KiB pages, so a page not wholly inside one mapping (mappings of 16 KiB) reads as zeros through it, where a view read it.
 - `VICTORY_DUMP_VERTICES=<dir>,<draws>[,<seconds>]`: one text file a draw for the next `<draws>` draws, from `<seconds>` after the first draw: the pipeline's input layout, the stride each stream steps by (the rule the Metal vertex descriptor is built with), each bound view's address, size and capacity (`view size / stride`), each element's values for the first vertices and the range each channel covers over the first 4,096 (with the count that is not finite, or past 1e6), and the index buffer's values with how many of them name a vertex past slot 0's capacity. Title memory is read by title address, as the title has it now. Off unless set. A mesh drawn as long thin strings or scattered shards is told apart from a mesh whose *data* is wrong by this: an element whose range spans huge or non-finite values is bad data, every index past the capacity is the wrong width or offset, and sane values with a broken picture put the fault in the program or its constants.
-- `VICTORY_TRACE_INDEX=<draws>`: for the first `<draws>` direct indexed draws, reads back the indices the draw will fetch from title memory, at the width the host bound and at the other one (the largest of each over the first 65,536 indices), and each bound vertex stream's capacity (`view size / stride`). A 32-bit index buffer the host reads as 16 bits (or the reverse) draws a mesh as a lattice of long thin triangles: every index becomes two 16-bit ones, and each pair joins vertices far apart in the mesh, while a small mesh with 16-bit indices stays whole. One line a draw. Off, the cost is one read of the switch per indexed draw.
-- `VICTORY_TRACE_STRIDES=1`: each described pipeline whose bound vertex-buffer stride is longer than its input layout's elements, when the pipeline is first made (a stage-in stream steps by the view's stride, so such a stream is read at the stride the title's view gives it; see "A stage-in stream steps by the view's stride"). Off, the cost is one read of the switch per drawn pipeline's layout.
+- `VICTORY_TRACE_GPU_VERTICES=1` (#8): what feeds GPU-driven draws, whose vertex shader fetches its own vertices. A dispatch dropped for want of a host compute pipeline notes the title ranges it could have written (its tables' buffer UAVs; each root view, to the end of the buffer resource holding it), per frame, cleared at each present. A draw whose vertex streams, index buffer or vertex-shader buffer views (root views, table entries) read one is warned about once per pipeline (`a draw reads what a dropped dispatch would have written`: binding, compute hash, overlap bytes); `what dropped dispatches would have written` counts them per frame. For the first draws whose vertex shader reads no attribute (`VICTORY_TRACE_GPU_VERTICES_DRAWS=<draws>[,<seconds>]`, default 512), each view it reads is summarised once per pipeline (mapped bytes, share of zero dwords, float32 range, not finite, over 1e6, over its first 1 MiB; numbers only), and one the host makes the null view (a gap, unmapped) is warned about. Off, one read of the switch per draw and dropped dispatch.
+- `VICTORY_TRACE_INDEX=<draws>[,<seconds>]`: for the first `<draws>` direct indexed draws from `<seconds>` after the first one (so a world trace skips the boot's and the menu's draws, which would spend the count), reads back the indices the draw will fetch from title memory, at the width the host bound and at the other one (the largest of each over the first 65,536 indices), and each bound vertex stream's capacity (`view size / stride`). A 32-bit index buffer the host reads as 16 bits (or the reverse) draws a mesh as a lattice of long thin triangles: every index becomes two 16-bit ones, and each pair joins vertices far apart in the mesh, while a small mesh with 16-bit indices stays whole. One line a draw. Off, the cost is one read of the switch per indexed draw.
+- `VICTORY_TRACE_STRIDES=1`: each described pipeline draw whose bound vertex-buffer stride differs from where its input layout's elements end (a stage-in stream steps by the view's stride, so such a stream is read at the stride the title's view gives it; see "A stage-in stream steps by the view's stride"). Off, the cost is one read of the switch per drawn pipeline's layout.
 - `VICTORY_TRACE_PAGES=1`: at each page-table build, what the title's mappings make of every 64 KiB title page: `pages` touched, `readable` (a pair view shows them), `joined` (readable only because the mappings covering them were joined into one run: the title reports an allocation one piece at a time), `split` (the title maps every byte, but no one view shows them: they are in more than one pool) and `gap` (the title really left a hole in the page: reading there is zeros to it too). The first 200 builds are logged. Off, the cost is one read of the switch per build. Test: `native::addr::tests::pages_mapped_one_piece_at_a_time_are_one_run`.
 - `VICTORY_TRACE_DESCRIPTORS=1`: how many descriptor records the title rewrites with plain stores, which no device call reports (#43). `NativeHost::remirror_tables` compares each bound table's records with those it last mirrored at every draw and dispatch; with the switch on, the frame log (`native draws so far`, every 64 frames) is followed by a `descriptor remirror` line with the records changed and checked since the previous one, per frame, per heap (by its first descriptor address, most changed first), and the most changed in one submission (`NativeHost::execute`). It counts only what that check sees: the first 16 entries of each bound table (more when the shader's metadata says so), at the draws that bind them; it does not say which code wrote the records. Off, the cost is one read of the switch per table and per submission. `VICTORY_TRACE_DESCRIPTORS=sites` also finds which title instructions store the records, for the choice between patching those store sites and remirroring: at each `ExecuteCommandLists` the pages of every descriptor heap's records (the title's own view, not the GPU's) are made read-only (`victory_platform::watch`). The loader's signal handler hands every write fault to the watch first, whoever wrote: a fault in a watched page makes that page writable again and the store runs again. It counts as a site (the instruction as an image offset) only when the instruction lies in the title image and the address in a heap's records, so the device's own view calls and title stores that only share the page go on unseen. The handler takes no lock and allocates nothing: a fixed table of 4096 sites (overflow counted), and the watched ranges (64 at most) in two tables behind sequence counts, so that a store faulting while a submission replaces the ranges is still the watch's: the handler reads the table in use and the one before it, and pages are opened only once neither holds them. Opened pages become read-write, which descriptor records' pages always are (the device's view calls write them). The frame log then adds a `descriptor store sites` line: the distinct sites so far and the 64 with the most stores, most first. Limit: a page stays writable until the next submission, so what is counted is the first store into each page per submission, not every store; a site that only stores after another one opened the page is seen less often, or not at all. A kernel write into a watched page (a `read` into it) would fail with `EFAULT` instead of faulting. Off, the handler's cost is one relaxed load per fault.
 - `VICTORY_WASAPI_WAV=<file>`: the audio device (`host_posix/wasapi.rs`) writes everything that reaches it as a float WAV — hearing exactly what the title's mixer produced, dry sound and (until #17 lands) silent reverb alike.
 - `VICTORY_SHADER_LOOP_LIMIT=<n>`: a translated loop stops after this many iterations per entry, and a lane that reaches the limit leaves the program as killed (a pixel discards; a genuine loop of more iterations is cut short too). Every loop a program has is a header's back edge with an iteration counter (`Lower::counters`); `Lower::lower_blocks` checks that every back edge has one before it emits anything and refuses the program ("a loop the translation cannot bound") if not, so no translated program can carry a loop the GPU may run forever. The default limit is 2^14 (a lane doing 2^20 passes took 60 to 195 ms on an Apple M5 GPU, where 2^14 take 1 to 3 ms). A lower limit shows whether such a loop is what makes a frame slow, a higher one whether the limit cut a genuine loop short. The value is part of the translation, so the shader cache keys on it. Test: `emit::lower::tests::a_back_edge_without_an_iteration_counter_is_found`.
 - `VICTORY_SHADER_TRACE_LOOP_LIMIT=<n>`: the same for programs that walk the title's ray-tracing structures (those containing `image_bvh*_intersect_ray`), in any build. The default there is 512, where other compute loops keep 2^14: a lane in a structure the host got wrong follows its parent links round until the limit, while the title's own cap is 65,535, so it counts on sound structures. A lower value is cheaper and may end a long walk in a sound structure early (a miss there: a dark spot in the indirect light). On an RTX 4070 Ti the screen probes' trace (`CS_ScreenProbes_TraceRays_RayBinning_BVH_Mixed`, `f22a76fcb967ee59`) took 41 ms a frame at 4,096 and 4.9 ms at 512, and the same opening's median went 12.1 to 13.9 fps with no change seen in the light (ported from Vice-Tay #305). Part of the translation: the shader cache keys on it. `VICTORY_SHADER_LOOP_LIMIT`, when set, overrides every loop.
+- `VICTORY_REFUSE_SHADERS=<hash>[,<hash>...]`: the shaders of those short hashes (the log's `first bind ... hash=`) are refused as if they did not translate ("refused by VICTORY_REFUSE_SHADERS"), and their work dropped, to bisect which translation a symptom follows (`native::shaders`).
 - Diagnostics build only (`--features diagnostics`): `VICTORY_DUMP_REGISTRY=<dir>` writes the title's subsystem-registry state (the singleton, its tables and their raw memory) to files in that directory at the first title `int3`, so an assert that checks the registry can be read after the fact (#24), and `VICTORY_XMA_DUMP=<dir>` saves the context words (`<n>-<index>.ctx`) and input buffer 0 (`.xma`) of the first 32 XMA voices enabled, to test the decoder on a title's streams outside the title.
 
 The first-chance log (`seh::dispatch`) shows a breakpoint's `rip` as the `int3` itself, as Windows x64 does.
@@ -763,6 +800,36 @@ now numbers: copies of an EXEC mask in `0ef1184e45342d20`, of a constant-buffer 
 vertex programs), and 137 compute programs move on to "a descriptor read only as data". Tests: `gfx_refusal_tests::a_join_of_swapped_copies_of_one_value_is_that_value`,
 `a_join_of_copies_of_two_values_stays_refused`.
 
+A lane mask the console saves to VGPR lanes and reads back is that mask at a join, though the
+edges that bring it are different values (`Lower::mask_word`, `spilled_word`): the register
+holds a mask dword on every path to the read-back, and a pair's low and high dwords are the
+mask's low and high. The console's compiler saves VCC beside a region (a `v_writelane_b32` of
+`vcc_lo`, `vcc_hi` from different copies on different paths, a `v_readlane_b32` back) and the
+join after the region takes that mask on one edge and the mask itself on another. Where the
+copies differ, `structure::spilled` (which wants one value on every path) has no value, so the
+edge brought none and was refused as "a lane-mask join of an untracked mask: a value the
+translation could not make" (the world's mesh programs `a2217fcc62753463` and `b94321581f232286`,
+2,533 and 673 draws of a Series S run). The saved mask is taken only where it has a lane mask
+(`masks`, or a `highs` pair); a dword that is data stays refused. Over the 21,600-container
+corpus 35 more translate (mesh and vertex programs of this shape), none regress and no output
+changes. Tests: `gfx_refusal_tests::a_mask_saved_to_vgpr_lanes_and_read_back_is_that_mask_at_a_join`,
+`a_mask_join_of_a_saved_mask_and_other_data_stays_refused`.
+
+A mesh program's SGPRs past its root parameters read 0, as a compute program's do past its user
+data (`Io::initialized_sgprs`, `Lower::inputs`): the hardware initializes none the program can
+depend on, and the title's mesh programs read `s16` and `s17`, which the console fills with the
+resource heap's address, then load descriptors through them — the descriptors the metadata
+lists are resolved by table entry, not by that address. Refused as "a hardware SGPR input"
+`3a0627643418e45d` (437 draws); over the corpus 66 more translate (all mesh programs refused for
+that reason), none regress and no output changes. Test:
+`gfx_refusal_tests::a_mesh_program_reads_an_sgpr_above_its_user_data_as_zero`.
+
+A root parameter's dword joined at a block entry is made there, as any read of it is
+(`Lower::fill_phis`): it is one edge's value, and the lowering made parameters only where it
+read them, so the join saw no value on that edge and was refused as "a join of mismatched
+values" (`801407880d74a2cd`, 179 draws). Over the corpus 6 more translate, none regress and no
+output changes. Test: `gfx_refusal_tests::a_join_of_a_root_constant_and_a_value_is_a_number`.
+
 In a mesh shader, a uniform branch can skip a block that replaces a scalar mask with a
 vector compare result. At the join each mesh thread uses its group index modulo the console
 wave size to read its bit. Wave64 takes lanes 32–63 from the high dword on the same edge.
@@ -791,6 +858,14 @@ join) or no lane reads the data edges (an EXEC skip): a per-lane loop's join sta
 and the lane's own path differ. The "a lane mask holding lanes elsewhere read as data: a program
 input" refusals (26 in that log) were joins whose edges are masks themselves and have no writing
 instruction, which this numbers.
+
+The number phi is cached (`ballots`) before its edges are numbered, so when an edge fails the empty
+phi stays cached and a later read of the same join can use it. The Metal Shader Converter segfaults
+(SimplifyCFG) on such DXIL, so `Lower::unfilled_phis` refuses a function with a written phi lacking
+an incoming value per edge ("a join whose incoming values were not all made"): 6 kept compute
+programs, 4 of which crashed it (docs/metal-backend.md, "Shader path"). Tests:
+`mask_tests::a_mask_joins_number_left_unmade_is_not_read_from_the_cache`,
+`bitcode::tests::a_written_phi_without_an_entry_per_edge_is_found`.
 
 A 64-bit scalar instruction in a 32-lane program works on its register pair's two dwords on their
 own (`Lower::mask_pair32_number`): the console compiler swaps a mask's register with a value's
@@ -1014,6 +1089,66 @@ time-out read; that was not possible in this session (see "Where a world frame's
 `VICTORY_METAL_RESIDENCY_SETS=heap` keeps the pools named by the encoders, `0` names everything per
 encoder on any Mac, `1` forces both sets. The choice is logged once at start-up.
 
+**A long run's end (`20261128-144215-9x1Ym4`, 16.6 minutes, 28 November).** The longest run so far
+on the 18 GiB M3 Pro, and it still ended at the watchdog (an `int3` at `image+0x63966f` from the
+watchdog's own thread, `2215eca`, `221c29c`, `257035e`, `3e54ad0` -- the same thread, another assert
+site; the `image+0x55e56f8` line in the report is the crash reporter's own death afterwards). The
+safety valve never fired: `held work runs without its waits after 60s` does not appear, and the
+scope table's oldest active scope stayed at 0 s. What the stall report does show is frames: the last
+ones took 8 to 11 s (`gap_ms`), 5 to 9 s of it `submit_ms` (texture work 2.7 to 3.6 s, `encode_ms`
+1.8 to 5.5 s), with 225 to 570 MB of a 12.65 GB footprint resident. In-world frame time was 5.8 s
+median over the last intervals (0.17 fps) against 3.2 s in the runs of 07:30 to 11:24 on the same
+Mac, so the drift is memory: everything is paged. The frame's texture budget is not the binding
+constraint there (`tex_deferred` 0 to 9 submissions a frame), and 25.8% of the run's draws were
+dropped for pipelines not made (`no_pipeline`), which the title pays for twice (recorded, then
+dropped). What remains is the resident set: 17.5 GB asked of residency at the end
+(`residency sets emptied sets=5 mb=17507`).
+
+**Where the pools are not pinned, they ride with each command buffer (28 November).** The pool set
+is every range of title memory a submission touches -- the whole 7.6 GiB on Series S -- joined to
+every queue for the run; on an 18 GiB Mac that is 17.3 GiB asked and 1.3 GiB held. It cannot simply
+be dropped: a blit encoder has no `useResource:usage:` (objc2-metal binds it on the render and
+compute encoders only), so a fill into title memory -- a cross-queue barrier word among them -- is
+one Metal may find nowhere, which is what run `20261128-132738-YD9M8b` died of at 78 s. So where the
+machine cannot hold the pools twice over (`memory >= 2 * (title + 4 GiB)`: 23 GiB for a Series S),
+each command buffer now gets a set of its own holding what that command buffer's encoders name
+(`PassSubmission::buffers`, `VICTORY_METAL_RESIDENCY_SETS=cb`), attached with `useResidencySet` and
+kept alive by its completion block. The heaps' sets are unchanged. What this costs per submission is
+one set and its additions; what it should stop paying is the whole pool pinned. A run has to say
+whether it does (`residency sets emptied sets=.. mb=..` at its end).
+
+**The decoded copies are not the swap (`VICTORY_METAL_TEXTURE_BUDGET_MB` 3072 against 1536, 28
+November).** Two runs of the same tree on the 18 GiB M3 Pro, otherwise identical (`VICTORY_TRACE_FRAME=1`,
+`VICTORY_STALL_SECONDS=15`, Series S): run `20261128-133911-YLju97` with a 1536 MiB budget held its
+copies at 1.50 GB of 1.50 and run `20261128-125656-ehKNAH` with 3072 at 2.97 of 3.00. The footprint
+did not move (12.20 against 9.98 to 12.04 GB): what the budget gave up came back as the host's own
+allocations -- `other_mib` 3,132 against 0 to 1,280, `metal_own_mib` 872 against 369 to 377 -- and as
+churn (15 copies a second given up and made again within 8 submissions, against 0), because a world
+whose working set is 4.5 GiB decodes the same textures again and again at 1.5. Swap used was 4,668 MB
+median against 4,051, and the in-world frame time was the same (3,177 against 2,965 ms median). So the
+copies are a cache that trades bytes for decode work, not a leak, and a smaller budget is the wrong
+direction on this Mac. What to take instead: the malloc zone's own growth (~2.2 GB, of which the
+containers are 236 MB) and the residency pin (below).
+
+**The pools are pinned only when the Mac could hold them twice over (28 November).** Run
+`20261128-125656-ehKNAH` on the 18 GiB M3 Pro asked Metal to keep 17.3 GiB resident (five sets,
+`residency sets emptied sets=5 mb=17306` at its end) while the process held 1.3 GiB: the pool set
+is every range of title memory a submission touches -- the whole 7.6 GiB on Series S -- joined to
+every queue for the run, and the heaps' sets add the copies and render targets. The rest was
+swapped; the GPU fell 10 to 30 s behind (command buffers of 2 to 3.6 s of kernel time, 51 of them
+for 99.5 s in 4.6 minutes), a queue's head sat on its barrier word
+(`0x18437f9d8 cmp 7 ref 0x88c ... now 0x88b`: the fill that would raise it was in a command buffer
+the GPU had not reached) and the title's 30 s watchdog ended the run -- with no GPU hang and no
+lost work. A gate on the *machine* was tried and reverted the same day: `memory >= 2 * (title + 4 GiB)` (23 GiB
+of RAM for a Series S's 7.6 GiB) put an 18 GiB Mac in `heap` mode, and run `20261128-132738-YD9M8b`
+then died at 78 s on a title fault at `image+0x4fb53a4` reading the graphics address
+`0x3184000000` as a pointer, with frames at 30 fps and no watchdog marker: a blit encoder has no
+`useResource:usage:` (objc2-metal binds it on the render and compute encoders only), so with the
+pools in no set a blit into title memory -- a barrier-word fill among them -- is one Metal is free
+to leave unreached. `heap` mode is safe only with a residency set per command buffer holding what
+that command buffer's encoders name; that is the change to make, not a RAM gate on the existing
+one.
+
 The default is unmeasured, so it has a way back: a command buffer the GPU fails with a page fault
 or out of memory (`gfx::says_residency_fault`: `kIOGPUCommandBufferCallbackErrorPageFault`,
 `...OutOfMemory`, and the same words in the description) sets `RESIDENCY_FAULTED`, logs once
@@ -1236,7 +1371,7 @@ and Metal then failed ordinary command buffers with `kIOGPUCommandBufferCallback
   **Block-compressed textures (BC1-BC7, BCPack's output) can never be sampled from a buffer**:
   `minimumLinearTextureAlignmentForPixelFormat` asserts "Linear textures do not support compressed
   pixel formats" (27 November), so they are decoded whatever their layout, and the reason report
-  counts them as `bcpack`. The zero-copy test that tried one aborted the test process, which is
+  counts them as `bcpack` (one image) or `bc_mipped`. The zero-copy test that tried one aborted the test process, which is
   how this was found; such a format is checked before the alignment query now. Default
   on; `VICTORY_TEXTURE_ZERO_COPY=0` turns it off. Tests:
   `a_linear_texture_is_sampled_straight_from_title_memory`,
@@ -1278,7 +1413,11 @@ and Metal then failed ordinary command buffers with `kIOGPUCommandBufferCallback
   presented frames, whichever comes first** (`VICTORY_TEXTURE_RELEASE_SECONDS`,
   `VICTORY_TEXTURE_RELEASE_FRAMES`; `Tracked::last_used_at` is wall time, since a paged world
   presents once every several seconds and 600 frames were nine minutes with nothing released on
-  27 November), under a texture budget, qualifies. A released copy still counts against the
+  27 November), under a texture budget that is not exceeded, qualifies: over it, the budget's check
+  takes those idle copies, and a released one would first be re-tiled from the GPU into its pages
+  (29 November). `VICTORY_TRACE_RELEASE_RSS=1` logs each batch (`release batch`: `released_mib`
+  beside `resident_delta_mib` and `footprint_delta_mib`): the pool's `newBufferWithBytesNoCopy`
+  maps the same pages and may keep them resident. A released copy still counts against the
   budget - its Metal texture is a host copy - and when the budget needs the room it is put back
   into the title's pages first (`restore_pages`: the bytes are the title's, not the budget's) and
   then given up like any other copy; without that the copies passed the cap by everything released
@@ -1290,7 +1429,7 @@ and Metal then failed ordinary command buffers with `kIOGPUCommandBufferCallback
   opening the page). Tests: `a_released_copy_puts_its_console_bytes_back`,
   `a_fault_on_a_released_page_is_restored`, `a_write_fault_opens_the_page_without_the_helper`,
   `a_host_write_to_a_released_copy_drops_it_and_reads_the_new_bytes`,
-  `a_released_copy_opens_its_pages_when_it_is_released`.
+  `a_released_copy_opens_its_pages_when_it_is_released`, `over_budget_nothing_is_released`.
 * **Decoded textures kept on disk (27 November).** The detile is a pure function of the console's
   bytes and the layout, so its result is kept: `texture_cache` stores each decode (the levels,
   their row and slice pitches, and the `to_host` conversion) keyed by the blake3 of the tiled
@@ -1633,6 +1772,81 @@ to 55,000 distinct D16 values, with the far plane (`0xffff`) covering 28% to 92%
 local lights' cube faces likewise (one 768x768x3 array: two used faces with 10,236 distinct values,
 the unused third all zero). So the maps hold the geometry their passes drew, and the remaining dark
 surfaces point at the light-list computes rather than at the shadow maps.
+
+#### Shadows and exposure: findings (28 November)
+
+Where the sun's shadows stop and where the exposure chain stands, as of the runs of 28 November
+from branch `native/w-shadows2`. Program names below come from the game's shader library offline
+(`crates/victory-shader`'s container code, matched by the code blob's digest to the library's
+`CS_*` names); the containers carry no name of their own.
+
+* **The shadow lookup's program translates, binds and runs.** The screen-space sun mask is
+  `shadowmask:CS_GenerateShadowMasks_Checkerboard_NoHair` (container `6aa2a48a0edcbc3a`, wave32,
+  4x8x1, 179 shader-resource entries at root parameter 0 and 18 unordered ones at parameter 1).
+  It is not refused on the 28 November head. A world run first binds it at the frame the world
+  starts (frame 2208 in the 13:50 run), its dispatch is dropped only in the frame whose Metal
+  pipeline was put off for translation (one "draws dropped (no host pipeline)" line), and the
+  run's dropped-dispatch table does not name it afterwards. It samples the cascades with
+  `image_sample_c_lz` on 2D and 2D-array resources (79 sampling instructions, 20 of them
+  comparisons) and writes one mask image through its unordered table.
+* **The depth side of the lookup is in place.** `VICTORY_TRACE_TARGETS` shows the cascade and
+  local-light passes binding one-layer views of 16-bit depth targets (view format 55/56, resources
+  of DXGI 53 and 55, 256x256 to 640x2560 plus 512x512x6 and 768x768x3 arrays): 64 distinct depth
+  attachments in a run, all `made=true` except one 512x512x6 array slice, whose bind logs "a depth
+  view the host cannot make; the passes that use it are refused" once (the same frame also drops
+  one pass for a render target it cannot make; both are one-off at the world's first frame and
+  the run continues). `alias_depth` is not what the sampled cascades need in practice: no
+  "placed view of a depth texture reads the depth target" line fires in a world run, so the
+  lighting samples the depth targets themselves (and, where a depth texture has a twin, the twin,
+  which `texture_tests` covers).
+* **Comparison samplers are no longer the fault.** `SamplerDesc.compare` reaches Metal for heap
+  samplers and the static ones (`descriptor`'s console word 16 decode; `victory-metal`
+  `sampler_tests` measure that a comparison sample without the function reads 0 and with it reads
+  the depth). `VICTORY_TRACE_TARGETS` prints each distinct comparison sampler the host makes (test,
+  address modes, border) so a run says which test the mask's taps use.
+* **What is still unproven is the mask's content, not its binding.** A pass trace armed at a frame
+  number (`VICTORY_TRACE_PASSES=<dir>,<skip>,<presents>,<frame>`) now lists a dispatch's tables to
+  the entries its shader names, so the mask dispatch's `rd=` names the cascades it reads and its
+  `wr=`/`PASSTEX` name the mask it writes with its non-zero fraction. The runs of 28 November used
+  the window on boot or intro frames (frame 1880 is 70 s in, the world's mask bind is frame 2208),
+  so a world-frame trace is the next step; the probe's arguments are in that section.
+* **Black surfaces are the indirect light, not the shadow term.** The title's indoors and shadowed
+  surfaces read the probes' screen light (R9G9B9E5), which `CS_ScreenProbes_TemporalResolve_*`
+  fills from rays. That resolve did not first-bind in any 28 November world run (the probe chain's
+  other programs do: `ActivateProbes`, `GenerateShaderBins`, `TraceRays_BVH_*`, `Inject`,
+  `PrefilterRadianceMips`, `RadianceSpatialFilter`), so the light image keeps its clear value and
+  the sun is the only light: sunlit faces are lit, every other face of the same material is black.
+  The ambient stand-in (`VICTORY_AMBIENT=1`) replaces that resolve's output and therefore cannot
+  fire when the resolve never dispatches (its startup line appears; its "first dispatch that
+  writes it" line does not).
+* **The exposure chain is title compute and one draw, and its first dispatch computes zero.**
+  The chain in one traced frame (a pass trace of the loading screen, presents 2082-2089, and the
+  same programs first-bind at the world frame):
+  - `avgLuminanceCompute:LuminanceMinMaxDownsampleInitCS` (15x9 groups) reads the scene's HDR
+    (DXGI 28/29 1280x720), the depth (DXGI 19) and a 2304x576 DXGI 54 target, and writes three
+    15x9 `R32G32B32A32_FLOAT` targets (slots 1.7-1.9 of its unordered table).
+  - `...LuminanceMinMaxDownsampleFinalCS` (1x1 groups) reads the 15x9s and writes a **5x1**
+    `R32G32B32A32_FLOAT` target.
+  - A full-target **draw** (`vertex 384deafe...`, `pixel f121b4bf...` in one container set) reads
+    a 4096x1 `R32_FLOAT` histogram, the 5x1, a 1x1 and a constant buffer, and writes the 1x1
+    `R32G32B32A32_FLOAT` exposure that the present pass reads at slot 18 of its table.
+  - The histogram programs (`ClearHistogramCS`, `ComputeSceneHistogramCS`,
+    `ComputeAverageLuminanceFromHistogramCS`) never first-bind; the 4096x1 histogram is non-zero
+    anyway in the traced frame (written by another program's view of it).
+  In that traced frame the Init **ran** and its inputs are non-zero (the 1280x720 HDR targets read
+  `nonzero=1.0000`), yet all three 15x9 targets, the 5x1 and both 1x1s read `nonzero=0.0000`,
+  `values=[0.0, 0.0, ...]`. Its read table also names three entries that decode to *null*: slot 0
+  entries 2 (`null:f42:dim1`, an R32_UINT buffer) and 12/14 (`null:f42:dim4`), and its write table
+  names two `0x0:buf` entries. A shader that reads a null descriptor gets zeros, so the first
+  candidate is that one of those entries is a buffer the console would bind (and the host wrote a
+  null descriptor for), not that the min/max maths is wrong. That needs the program's code beside
+  the trace; the container is `4e013cd1b466923e` (11,472 bytes) in the shader cache.
+  The 1x1 targets at world time: their dumped maximum/mean went 10932/3653 at 257 s, 35/15 at
+  318 s, 44/18 at 380 s, 0.00067/-7.0 at 459 s and 0.4/-0.7 at 580 s, beside frames that alternate
+  between fully black and a white bloom haze; a negative channel and seven orders of magnitude
+  inside one scene is what a broken chain upstream of the multiplier does. `PASSTEX` prints
+  `values=` for a 1x1 DXGI 2 target, so the exact four channels are one `VICTORY_TRACE_PASSES`
+  window away.
 
 #### Typed and structured buffer views lazily carry a Metal `texture_buffer`
 
@@ -2457,8 +2671,13 @@ a new wrap of the same range each time the entry was mirrored again, while the o
 alive in heap entries and work in flight: in the 80 s after the world loaded, the 174 MiB view was
 wrapped 5 times with the same signature, the 50 MiB one 10 times and a 24 MiB one 17 times (the
 log stops at 32), and that run ended in GPU timeouts and an out-of-memory error. A view with a real gap (part of its range not
-mapped) stays the null view, logged at info level (`a buffer view over title memory with a gap
-stays the null view`, first 64). Test: `tests::a_buffer_view_across_title_pages_out_of_pool_order_reads_the_title_mapping`.
+mapped) is served page by page, or by its mapped prefix where no private page range can be made,
+and only a wholly unmapped one stays the null view (see "A heap buffer view over a range with a
+gap"); each is logged at info level (`a buffer view over title memory with a gap is not one title
+run`, first 64, with its mapped pages and how many lie past the first hole), and the totals over
+all of them every power of two (`buffer views over title memory with gaps so far` with
+`partially_mapped` and `with_a_page_past_the_hole`), so the log's cap cannot be read as the count.
+Test: `tests::a_buffer_view_across_title_pages_out_of_pool_order_reads_the_title_mapping`.
 Two title pages, mapped for real at a title address from pool pages 2 then 1, hold 64 words across
 the page boundary. A compute shader reads them through a heap view: it now gets them, and was
 refused the view before.
@@ -2877,9 +3096,60 @@ passes by GPU time` line with the ten encoders that held the GPU longest:
 - `queues` splits `gpu_ms` by queue.
 - `tex_*` is the texture work of the window's submissions: batches, textures read (first uploads,
   unchanged), MiB, and the probe, prepare, upload, read, hash and detile times — the same figures
-  `VICTORY_TRACE_TEXTURE_SYNC` prints once a second, summed per frame here.
+  `VICTORY_TRACE_TEXTURE_SYNC` prints once a second, summed per frame here. `tex_deferred` counts
+  submissions whose textures were left for the next frame because the frame's 3 s of texture work
+  was spent (`textures::FRAME_TEXTURE_WORK`; below).
 - `put_off` pipelines were put off for a later frame, `pipes` were asked of the backend (of which
   `pipes_made` Metal compiled now) taking `pipes_ms` on the title's threads.
+
+**The watchdog's other clocks, and the valve the native pump was missing (28 November).** The fault
+at `image+0x55e56f8` is not always the 30 s heartbeat. Run `20261128-133911-YLju97` died on the
+watchdog's *300 s scope* clock, and as a breakpoint rather than the fail-fast store: `int3` at
+`image+0x5149aec`, called from the watchdog's own thread (`2215eca`, `221c29c`, `257035e`,
+`23d0f9a`, `23d1211`), so the report's `image+0x55e56f8` line was the crash reporter's own death
+afterwards. The heartbeat word at `image+0x971fb8` never changed in any of these runs (the stall
+report says "never changed in this run" on every line): on this build the scope table is the clock
+that runs. A scope a title thread enters and does not leave for 300 s fails the run, and the
+`VICTORY_STALL_SECONDS` report now reads that table through a nesting deeper than eight entries
+(`scopes_for_monitor`), which previously made it refuse the whole table and go blind exactly when
+the load's call stack was deep.
+
+What holds a title thread for 300 s is a queue's head waiting on a cross-queue barrier word whose
+writer never ran. On Windows `queue::VALVE` has run such a head after 10 s since the beginning; the
+native pump had no valve at all, so the run of 28 November -- 26,651 dispatches, 841 of them put
+off and thousands of draws dropped for refused shaders -- could leave a barrier word unwritten and
+one queue waiting for good. `Title::pump` now runs it past `Title::VALVE` (60 s: longer than any
+wait that resolves, a world frame's barrier being 3 to 20 s) and warns with what it waited for. A
+fired valve is a lie about ordering, so it is logged by address, comparison, reference and mask;
+a run whose log has none did not need it.
+
+**A frame's texture work has a wall-time budget (`textures::FRAME_TEXTURE_WORK`, 3 s).** A world
+frame on 28 November (run `20261128-094823-as94uq`, 18 GB M3 Pro) listed 300 textures and 1.05 to
+1.17 GiB of changed memory per frame; with only 1.5 GB of the 11.7 GB footprint resident (the Mac had
+swapped 3.5 GB), reading and detiling that took 5 to 7 s of `prepare_ms`, 8 s of `apply_ms` and 7 s of
+`encode_ms` a frame. Three frames in a row were 19.6, 20.4 and 37.9 s, and the last ended the run at
+the title's fail-fast (`image+0x55e56f8`): the render thread's frame had held the watchdog's 30 s.
+`SCAN_BUDGET` bounds the bytes a frame admits (384 MiB) but not the time they take: the same bytes are
+a second resident and twenty swapped out. `glue::submit` now asks the title for what the frame has left
+(`Title::texture_work_left`) before listing, before each batch and after each upload; past it, the
+batch's jobs go back to the watch's dirty set (and never-uploaded ones to `unloaded`, so they stay
+first uploads) and the next frame reads them (`Title::defer_reads`). A texture is then at most a frame
+late; a deferral is counted as `tex_deferred` in the frame line, and nothing is dropped from the title's
+point of view. Test: `texture_tests::a_frames_texture_work_is_bounded_in_wall_time`.
+
+**Which clock a watchdog fault ran on (`VICTORY_STALL_SECONDS=<n>`).** A run can present every few
+seconds and still die at the marker: the watchdog's fallback is 30 s without its *global heartbeat*
+(`image+0x971fb8`), which is not a present, and a scope a title thread entered and never left fails
+after 300 s. A frame line alone cannot tell which one fired. The stall report reads, once a second and
+without taking the host's lock: the presented frames (`native::presented_frames`, an atomic), the
+watchdog's heartbeat word, and its scope table with each entry's age against the same QPC the entries
+are stamped with (`watchdog::active`, `victory_gpu::clock::counter`). When any of them has not moved for
+`n` seconds it logs the host phase in progress (`native::host_phase`: waiting for the submission order,
+reading/detiling textures, uploading, encoding, a pipeline) with its age and host thread, plus the
+scopes, and for the first three reports every title thread's host call and call chain
+(`dump::report_now`, the `VICTORY_DUMP_THREADS` dump taken now). A heartbeat word that never changes
+is named as such, so another build's layout does not pass for a stopped heartbeat. Host calls set the
+phase with two atomics; `VICTORY_TRACE_FRAME` is not needed for the stall report.
 
 `VICTORY_TRACE_FRAME=passes` attributes time to passes by putting every pass in a command buffer of
 its own (`VICTORY_PASSES_PER_BUFFER=1`'s split, driven by the frame trace), so a buffer's GPU time
@@ -3189,13 +3459,27 @@ room after its bone weights, a quantised position stream with a spare dword) was
 by its elements' end, and every vertex after the first was read from the wrong bytes — a shape that
 comes out shattered, every triangle of the draw a shard. The bound strides now set the stream's
 stride for a described pipeline as they already did for a guessed one (`Graphics::with_strides`;
-`make_pipe` takes the list's `l.strides`): the longer of the two wins, so a layout that ends past its
-view still reads within it. A bound stride past 4,096 is not one an input assembler takes (D3D12's
-limit is 2,048) and is a stale view of ours: past it the layout's elements decide, as before
-(`MAX_STRIDE` in `vertex_layout`). Whether the world's pipelines have such padded streams is what
-`VICTORY_TRACE_STRIDES=1` says: it logs each described pipeline whose view stride is longer than its
-layout's elements, once, when the pipeline is first made. Test:
-`native::state::tests::a_described_stream_steps_by_the_view_stride_when_it_pads`.
+`make_pipe` takes the list's `l.strides`). The view's stride wins in both directions: a layout that
+ends past its view reads the elements past its end out of the vertex's bytes, as D3D12 reads them,
+instead of stepping by the layout and moving every element the shader does read. The layout's end
+is used only for a slot the draw bound no stride for (0), and for a bound stride past 4,096 (not one
+an input assembler takes; D3D12's limit is 2,048, so it is a stale view of ours): `MAX_STRIDE` in
+`apply_strides`. Whether the world's pipelines step differently from their layouts is what
+`VICTORY_TRACE_STRIDES=1` says: it logs each described draw whose view stride differs from its
+layout's elements' end. Test: `native::state::tests::a_described_stream_steps_by_the_view_stride`.
+
+**A host pipeline is made per stride (28 November).** Metal's vertex descriptor is part of the
+render pipeline state, so the strides a stream steps by are fixed when the host pipeline is made.
+D3D12 keeps the stride in the view instead: one pipeline object may be drawn with vertex buffers
+of different strides from one draw to the next. The host cached one pipeline per title object
+(`Title::pipelines`), so every draw after the first read its vertices at the first draw's stride:
+a model drawn with a 40-byte vertex buffer and later with a 24-byte one came out stretched, its
+triangles reaching from where the wrong bytes put each vertex. A described pipeline's streams
+(slot and the layout's own end) are recorded when its host pipeline is first made
+(`Title::pipeline_streams`), and the strides the draw bound are folded into the cache key
+(`glue::stream_signature`, with the console pipelines' targets). Two draws of one pipeline that
+step a stream differently now get two host pipelines, each with its own vertex descriptor.
+Test: `native::glue::index_trace_tests::a_pipeline_gets_a_host_pipeline_per_stride_its_draws_bind`.
 
 
 ## Mip-aware texture probes and pool-coalesced partial reads (#179)
@@ -3271,12 +3555,54 @@ traced run of 3 world frames, `VICTORY_TRACE_PASSES`, Series S, M5 Pro):
   `an_empty_index_buffer_view_clears_the_binding` and `an_empty_vertex_buffer_view_unbinds_the_slot`
   pin the input-assembler bindings. Without the size, both drawing tests fail: the second half of
   the buffer reads the pool's canary page.
-- Still open: a heap buffer view with a real gap stays the null view and reads zeros (40 logged in
-  that run, 13 KB to 130 KB, at title addresses of streamed data); a 64 KiB title page whose first
+  `a_32_bit_index_buffer_across_title_pages_draws_its_triangle` draws the same triangle from
+  `R32_UINT` indices across the boundary; bound as 16-bit they would make a triangle with no area.
+- The one-byte fallback left in `NativeHost::prep` (a view size of `u32::MAX`, "none given") is
+  not reachable from a title (checked 28 November): only the sizeless `NativeList::set_vertex_buffer`
+  and `set_index_buffer`, which tests alone call, store it; `IASetVertexBuffers` and
+  `IASetIndexBuffer` pass the title's `SizeInBytes`, a size of 0 clears the binding, and
+  `ExecuteIndirect` signatures that set vertex or index buffers are dropped (`signature::command`).
+  A title view would reach it only by giving 0xFFFFFFFF bytes. Switching either index drawing test
+  to the sizeless setter makes it fail, so the fallback must stay out of title paths.
+- **A heap buffer view over a range with a gap (fixed 28 November).** The title binds a streamed
+  allocation's whole range as a buffer view while only part of it is paged in (the views logged
+  here were 256 KiB to 11 MiB, at title addresses of streamed data, and their gaps never filled in
+  the run's 600 s: the range, not a slow mapping, decides). A range that is not one pool run and
+  not wholly mapped was the null view as a whole, so a GPU-driven vertex shader reading its mesh
+  through it got zero for every vertex: the mesh's triangles fanned out of one point -- the fans
+  and streaks over the world. `NativeHost::title_holes` now serves such a range page by page
+  (D3D12 tier 2's shape for a reserved resource): a private host range of the view's size is made
+  with `mach_vm_allocate`, each 16 KiB page the title maps is shared into it with `mach_vm_remap`
+  (a remap, not a copy, so later writes by either side are seen by both), and a hole gets zero
+  pages -- one shared, read-only zero page for a view nothing writes, the range's own zero pages
+  for a writable one, so a stored tile cannot reach another view's hole. The no-copy buffer is
+  made over *that* range, never over the title's own addresses (the title may map there later).
+  A wrap is keyed by a page signature (`PoolTable::page_map`: which pages are mapped and from
+  where, holes included) so it is made again when the title maps more -- the pages are remapped in
+  place, so the buffer a heap entry shows keeps its address -- and the page range is kept while a
+  heap entry shows the wrap. Writable views keep the range's own size as the descriptor's
+  record count; `mirror` still serves a view the private range cannot be made for
+  (`NativeHost::title_prefix`) by wrapping its longest wholly mapped prefix and clamping the
+  descriptor's size to it, so a read into the unmapped rest is out of bounds (0). Typed buffer
+  views materialize over the same pages (their width ends with the buffer).
+  Tests: `native::tests::heap_tests::
+  a_heap_buffer_view_over_a_range_with_a_hole_in_the_middle_reads_both_sides_and_zero` (three
+  title pages, the middle unmapped: the shader reads the data before and after the hole and 0 in
+  it) and `a_heap_buffer_view_over_a_range_with_a_gap_shows_its_mapped_pages` (a missing tail: a
+  write through the view reaches the mapped page, and the record count is the range's).
+  `VICTORY_TRACE_GAP_VIEWS=1` logs, once a pipeline, each draw that binds a heap holding views over
+  title pages, with its shaders; the mirror of a range with holes logs its mapped pages, its page
+  count, and how many mapped pages lie past the first hole (a "middle" hole, which the prefix
+  fallback would lose), with running totals at 1, 2, 4, 8... distinct entries. `VICTORY_TRACE_PAGES=1`
+  reports the page table's own split and gap pages.
+- Still open: a 64 KiB title page whose first
   byte is unmapped, or whose bytes are in two pools, is a null page in the page table, which every
   vertex and mesh program reads root views through ("Bring-up diagnostics", `VICTORY_TRACE_ROOT_SPAN`;
   a page the title maps one piece at a time is one run now, fixed below). A multi-dword access that
   crosses a page used to read its later dwords from the pool past the first page too: fixed below.
+  `VICTORY_TRACE_GPU_VERTICES=1` ("Bring-up diagnostics") says whether such null views are what
+  the world's vertex shaders read, and whether a refused compute program should have written what
+  a draw reads as vertices this frame.
 - **An access whose dwords cross a page (fixed 27 November).** The page table names one view per
   64 KiB page, and an access of more than one dword used to look it up once, at its first byte: the
   dwords on the next title page read the pool's own bytes after the first page (another title page,

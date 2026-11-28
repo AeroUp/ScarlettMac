@@ -973,6 +973,7 @@ fn signature(part: &[u8]) -> Result<Vec<container::SigElement>, ShaderError> {
             68 => 18,
             69 => 20,
             70 => 15,
+            23 => 28, // barycentrics
             25 => 30, // cull primitive
             _ => {
                 return Err(ShaderError::Unsupported {
@@ -1381,34 +1382,23 @@ mod tests {
             let res = resource::track(&p, &native.layout, native.stage, Some(&st)).unwrap();
             let io = io::raise(&p, &native).unwrap();
             let shader = emit(&c, &native, &p, &st, &io, &res);
-            if matches!(case, Complete | NonzeroBase) {
-                let shader = shader.unwrap();
-                assert!(
-                    Container::parse(&shader.dxil)
-                        .unwrap()
-                        .part(FourCC::DXIL)
-                        .is_some()
-                );
-                #[cfg(windows)]
-                if let Ok(mut validator) =
-                    validator::Validator::load(validator::Validator::default_path().as_deref())
-                {
-                    let mut dxil = shader.dxil;
-                    validator.validate(&mut dxil).unwrap();
-                    eprintln!("synthetic {case:?} SDK valid bytes={}", dxil.len());
-                }
-            } else {
-                eprintln!("synthetic {case:?} {:?}", shader.as_ref().err());
-                assert!(
-                    matches!(
-                        shader,
-                        Err(ShaderError::Unsupported {
-                            what: "barycentrics read directly",
-                            ..
-                        })
-                    ),
-                    "{case:?}"
-                );
+            let shader = shader.unwrap_or_else(|e| panic!("{case:?}: {e}"));
+            let host = Container::parse(&shader.dxil).unwrap();
+            assert!(host.part(FourCC::DXIL).is_some());
+            // The loop overwrites both barycentric registers before anything reads them: no
+            // input. Otherwise some lane reads one raw, from SV_Barycentrics (it was refused as
+            // "barycentrics read directly").
+            let isg1 = host.part(FourCC::ISG1).map_or(&[0u8; 8][..], |p| p.data);
+            let isg1 = signature(isg1).unwrap();
+            let raw = isg1.iter().any(|e| e.name == "SV_Barycentrics" && e.kind == 28);
+            assert_eq!(raw, !matches!(case, Complete | NonzeroBase), "{case:?}");
+            #[cfg(windows)]
+            if let Ok(mut validator) =
+                validator::Validator::load(validator::Validator::default_path().as_deref())
+            {
+                let mut dxil = shader.dxil;
+                validator.validate(&mut dxil).unwrap();
+                eprintln!("synthetic {case:?} SDK valid bytes={}", dxil.len());
             }
         }
     }

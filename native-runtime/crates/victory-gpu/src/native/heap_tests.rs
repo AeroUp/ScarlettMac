@@ -1669,3 +1669,178 @@ fn a_compute_shader_reads_both_the_view_strides_and_the_view_addresses() {
     assert_eq!((t.host.unset_roots(), t.host.failed()), (0, 0));
     drop(records);
 }
+
+
+/// A heap buffer view whose title range has a gap (a streamed allocation whose tail is not mapped
+/// yet) shows its mapped pages, and a write through it reaches them, where the null view swallowed
+/// it. The whole range read zeros before, so a GPU-driven vertex fetch got zero for every vertex
+/// and a mesh's triangles fanned out of one point. The holes are the view's own zero pages (a
+/// writable view), so its descriptor's record count stays the range's (D3D12 tier 2).
+#[test]
+fn a_heap_buffer_view_over_a_range_with_a_gap_shows_its_mapped_pages() {
+    // Table at s4: entry 0 is the gapped view, entry 1 a raw output view. Lane 0 writes 1 into the
+    // gapped view at offset 0 and stores entry 0's record count at the output.
+    const CS_GAP: &[u32] = &[
+        0xBE8A_0304, // s_mov_b32 s10, s4
+        0xBE8B_0380, // s_mov_b32 s11, 0
+        0xF408_0305, 0xFA00_0000, // s_load_dwordx4 s[12:15], s[10:11], 0x0
+        0xF408_0405, 0xFA00_0020, // s_load_dwordx4 s[16:19], s[10:11], 0x20
+        0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+        0x7E00_0281, // v_mov_b32 v0, 1
+        0x7E02_020E, // v_mov_b32 v1, s14 (entry 0's num_records)
+        0xE070_0000, 0x8003_0000, // buffer_store_dword v0, off, s[12:15], 0
+        0xE070_0000, 0x8004_0100, // buffer_store_dword v1, off, s[16:19], 0
+        0xBF81_0000, // s_endpgm
+    ];
+    let mut uav0 = [0u8; 32];
+    uav0[0] = 0x41;
+    uav0[4..6].copy_from_slice(&[3, 3]);
+    uav0[16] = 1;
+    uav0[20..23].copy_from_slice(&[4, 4, 0]);
+    let mut uav1 = uav0;
+    uav1[8] = 8; // entry 1 is 8 dwords further
+    let c = crate::pipeline::test_compute_container(CS_GAP, &[uav0, uav1], 7);
+    let cs = shaders::translate(&c).unwrap();
+    use crate::native::memory::PoolObserver;
+    let Some(h) = super::host() else { return };
+    let page = victory_metal::mem::page_size().max(16384);
+    let pool = victory_metal::mem::Alias::new(4 * page).unwrap();
+    let info = crate::native::memory::PoolInfo {
+        id: 1,
+        base: pool.primary as usize,
+        len: pool.len,
+        memory_entry: None,
+    };
+    h.memory().pool_created(&info);
+    // Two title pages of the pool are mapped at a real title address of this process; a view of
+    // four pages has an unmapped tail after them.
+    let title = super::TitlePages::new(&h, &pool, &info, &[page, 2 * page], page);
+    let memory = h.memory();
+    let mut t = Title::new(h.backend, memory);
+    let records = vec![0u32; 8 * 2];
+    let start = records.as_ptr() as u64;
+    let heap = t.host.heap(HeapKind::Resource, start, 2).unwrap();
+    let mut resource = [0u32; 14];
+    resource[0] = 1; // BUFFER
+    let uav = |address: u64, bytes: u32| {
+        let mut v = [0u32; 16];
+        (v[1], v[4], v[8]) = (1, bytes / 4, 1);
+        [v[10], v[11]] = super::addr_tests::halves(address);
+        v
+    };
+    let gapped = uav(title.va, (4 * page) as u32);
+    crate::descriptor::create_placed_uav(std::ptr::null_mut(), &resource, &gapped, start);
+    // The mapped prefix is shown, not refused as a whole.
+    assert!(t.host.mirror(start).unwrap(), "the view is served page by page");
+    let out = uav(title.va + 32, 8);
+    crate::descriptor::create_placed_uav(std::ptr::null_mut(), &resource, &out, start + 32);
+    assert!(t.host.mirror(start + 32).unwrap());
+    let Pipe::Compute(pso) = t.compute_pipe(&cs, "gap") else { panic!("{:?}", t.shaders) };
+    let mut l = NativeList::default();
+    l.set_heaps(Some(&heap), None);
+    l.set_compute_pipeline(&pso);
+    l.set_compute_root_table(0, &heap, 0);
+    l.dispatch(1, 1, 1).unwrap();
+    super::run(&t.host, &[&l]);
+    // The write through the view reached the title's mapped page (the null view swallowed it) ...
+    assert_eq!(title.read::<u32>(0, 1), [1], "the mapped prefix is the title's memory");
+    // ... and the descriptor's record count is the range's own (the holes are served as zeros).
+    assert_eq!(
+        title.read::<u32>(32, 1),
+        [(4 * page) as u32],
+        "the record count is the range's byte size, holes included"
+    );
+    assert_eq!(t.shaders.refusals(), 0, "{:?}", t.shaders.refused);
+    drop(records);
+}
+
+/// A heap buffer view over a range with a hole in the *middle* reads real data on both sides of the
+/// hole and zeros in it: D3D12 tier 2's shape for a reserved resource, where the host used to make
+/// the whole range the null view (every vertex zero) and the mapped-prefix fallback alone lost
+/// every page after the first hole.
+#[test]
+fn a_heap_buffer_view_over_a_range_with_a_hole_in_the_middle_reads_both_sides_and_zero() {
+    // Table at s4: entry 0 is the partly mapped view, entry 1 a raw output view. Lane 0 loads the
+    // dword at offsets 0, 0x4000 and 0x8000 through entry 0 and stores them at output offsets 0, 4
+    // and 8.
+    const CS_HOLE: &[u32] = &[
+        0xBE8A_0304, // s_mov_b32 s10, s4
+        0xBE8B_0380, // s_mov_b32 s11, 0
+        0xF408_0305, 0xFA00_0000, // s_load_dwordx4 s[12:15], s[10:11], 0x0
+        0xF408_0405, 0xFA00_0020, // s_load_dwordx4 s[16:19], s[10:11], 0x20
+        0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+        0x7E00_0280, // v_mov_b32 v0, 0
+        0xE030_1000, 0x8003_0100, // buffer_load_dword v1, v0, s[12:15], 0 offen
+        0xBF8C_3F70, // s_waitcnt vmcnt(0)
+        0xE070_1000, 0x8004_0100, // buffer_store_dword v1, v0, s[16:19], 0 offen
+        0x7E00_02FF, 0x0000_4000, // v_mov_b32 v0, 0x4000
+        0xE030_1000, 0x8003_0200, // buffer_load_dword v2, v0, s[12:15], 0 offen
+        0xBF8C_3F70, // s_waitcnt vmcnt(0)
+        0x7E02_02FF, 0x0000_0004, // v_mov_b32 v1, 4
+        0xE070_1000, 0x8004_0201, // buffer_store_dword v2, v1, s[16:19], 0 offen
+        0x7E00_02FF, 0x0000_8000, // v_mov_b32 v0, 0x8000
+        0xE030_1000, 0x8003_0300, // buffer_load_dword v3, v0, s[12:15], 0 offen
+        0xBF8C_3F70, // s_waitcnt vmcnt(0)
+        0x7E02_02FF, 0x0000_0008, // v_mov_b32 v1, 8
+        0xE070_1000, 0x8004_0301, // buffer_store_dword v3, v1, s[16:19], 0 offen
+        0xBF8C_3F70, // s_waitcnt vmcnt(0)
+        0xBF81_0000, // s_endpgm
+    ];
+    let mut uav0 = [0u8; 32];
+    uav0[0] = 0x41;
+    uav0[4..6].copy_from_slice(&[3, 3]);
+    uav0[16] = 1;
+    uav0[20..23].copy_from_slice(&[4, 4, 0]);
+    let mut uav1 = uav0;
+    uav1[8] = 8; // entry 1 is 8 dwords further
+    let c = crate::pipeline::test_compute_container(CS_HOLE, &[uav0, uav1], 7);
+    let cs = shaders::translate(&c).unwrap();
+    use crate::native::memory::PoolObserver;
+    let Some(h) = super::host() else { return };
+    let page = victory_metal::mem::page_size().max(16384);
+    let pool = victory_metal::mem::Alias::new(4 * page).unwrap();
+    let info = crate::native::memory::PoolInfo {
+        id: 1,
+        base: pool.primary as usize,
+        len: pool.len,
+        memory_entry: None,
+    };
+    h.memory().pool_created(&info);
+    // Three title pages, then the middle one unmapped: a hole in the range, mapped pages after it.
+    let title = super::TitlePages::new(&h, &pool, &info, &[page, 2 * page, 3 * page], page);
+    title.write(0, &[0xAAAA_AAAAu32]);
+    title.write(2 * page, &[0xBBBB_BBBBu32]);
+    title.unmap(&h, 1, page);
+    let memory = h.memory();
+    let mut t = Title::new(h.backend, memory);
+    let records = vec![0u32; 8 * 2];
+    let start = records.as_ptr() as u64;
+    let heap = t.host.heap(HeapKind::Resource, start, 2).unwrap();
+    let mut resource = [0u32; 14];
+    resource[0] = 1; // BUFFER
+    let mut srv = [0u32; 16];
+    (srv[1], srv[6], srv[8]) = (1, (3 * page / 4) as u32, 1);
+    [srv[10], srv[11]] = super::addr_tests::halves(title.va);
+    crate::descriptor::create_placed_srv(std::ptr::null_mut(), &resource, &srv, start);
+    assert!(t.host.mirror(start).unwrap(), "the view is served page by page");
+    let mut out = [0u32; 16];
+    (out[1], out[4], out[8]) = (1, 8, 1);
+    [out[10], out[11]] = super::addr_tests::halves(title.va + 32);
+    crate::descriptor::create_placed_uav(std::ptr::null_mut(), &resource, &out, start + 32);
+    assert!(t.host.mirror(start + 32).unwrap());
+    let Pipe::Compute(pso) = t.compute_pipe(&cs, "hole") else { panic!("{:?}", t.shaders) };
+    let mut l = NativeList::default();
+    l.set_heaps(Some(&heap), None);
+    l.set_compute_pipeline(&pso);
+    l.set_compute_root_table(0, &heap, 0);
+    l.dispatch(1, 1, 1).unwrap();
+    super::run(&t.host, &[&l]);
+    // The page before the hole, zeros in the hole, and the page after it.
+    assert_eq!(
+        title.read::<u32>(32, 3),
+        [0xAAAA_AAAA, 0, 0xBBBB_BBBB],
+        "the mapped pages on both sides of the hole and zeros in it"
+    );
+    assert_eq!(t.shaders.refusals(), 0, "{:?}", t.shaders.refused);
+    drop(records);
+}

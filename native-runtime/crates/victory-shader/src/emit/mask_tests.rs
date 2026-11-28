@@ -1097,3 +1097,56 @@ fn a_64_bit_swap_in_a_32_lane_program_numbers_each_dword() {
     let r = lowered32(BODY, 32);
     assert!(r.is_ok(), "{:?}", r.err());
 }
+
+/// A mask join read as data whose number fails on one edge leaves a phi with no incoming
+/// values: `Lower::mask_phi_number` caches the join's phi before filling it (for a back edge
+/// that reads it), the first read fails on the data edge (a hardware register the translation
+/// does not make) and is not needed, and a second read of the same join finds the empty phi in
+/// the cache. The Metal Shader Converter crashed in SimplifyCFG on such functions, so the
+/// lowering refuses them (`Lower::unfilled_phis`); they translated before.
+#[test]
+fn a_mask_joins_number_left_unmade_is_not_read_from_the_cache() {
+    let body = |data: &[u32], reads: &[u32]| -> Vec<u32> {
+        let mut v = vec![
+            0x7D82_0085, // v_cmp_lt_u32_e32 vcc, 5, v0
+            0xBE82_046A, // s_mov_b64 s[2:3], vcc
+            0xBF87_0003, // s_cbranch_vccnz L1
+            0x7D88_0087, // v_cmp_gt_u32_e32 vcc, 7, v0
+            0xBE82_046A, // s_mov_b64 s[2:3], vcc
+            0xBF82_0002, // s_branch L2
+            0x7D84_0083, // L1: v_cmp_eq_u32_e32 vcc, 3, v0
+            0xBE82_046A, // s_mov_b64 s[2:3], vcc
+            // L2: s_cbranch_vccnz L3 (a uniform branch: the whole wave takes one edge)
+            0xBF87_0000 | (data.len() as u32 + 1),
+        ];
+        v.extend_from_slice(data); // s2 = data
+        v.extend_from_slice(&[
+            0xBF82_0001, // s_branch L4
+            0xBF80_0000, // L3: s_nop 0 (s2 keeps the mask join)
+        ]);
+        v.extend_from_slice(reads); // L4: the join of the mask join and data, read as data
+        v.push(0x7E02_0209); // v_mov_b32 v1, s9
+        v
+    };
+    const HW_ID: &[u32] = &[0xB902_F804]; // s_getreg_b32 s2, hwreg(HW_REG_HW_ID)
+    const CONSTANT: &[u32] = &[0xBE82_03FF, 0x0000_1234]; // s_mov_b32 s2, 0x1234
+    const ONE_READ: &[u32] = &[0xBE89_1002]; // s_bcnt1_i32_b64 s9, s[2:3]
+    const TWO_READS: &[u32] = &[
+        0xBE88_1002, // s_bcnt1_i32_b64 s8, s[2:3] (fails, and nothing reads s8)
+        0xBE89_1002, // s_bcnt1_i32_b64 s9, s[2:3]
+    ];
+    let r = lowered(&body(CONSTANT, TWO_READS), 64, false);
+    assert!(r.is_ok(), "{:?}", r.err());
+    let r = lowered(&body(HW_ID, ONE_READ), 64, false).err();
+    assert!(
+        matches!(&r, Some(crate::ShaderError::Unsupported { what, .. })
+            if !what.contains("not all made")),
+        "{r:?}"
+    );
+    let r = lowered(&body(HW_ID, TWO_READS), 64, false).err();
+    assert!(
+        matches!(&r, Some(crate::ShaderError::Unsupported { what, .. })
+            if what.contains("a join whose incoming values were not all made")),
+        "{r:?}"
+    );
+}

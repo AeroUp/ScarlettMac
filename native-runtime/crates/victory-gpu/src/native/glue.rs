@@ -268,6 +268,14 @@ pub(crate) fn with_list<R>(
 
 // --- queues and fences ---
 
+/// A `with_title` in [`submit`]'s phases: its result, its wall time, and how much of that waited
+/// for the host's lock (the frame line's `apply_wait_ms`/`encode_wait_ms`).
+fn timed_body<T>(f: impl FnOnce(&mut MetalTitle) -> T) -> (Option<T>, std::time::Duration, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let r = with_title(f);
+    (r, started.elapsed(), super::hosttime::last_wait())
+}
+
 /// `ExecuteCommandLists`.
 pub(crate) fn submit(queue: This, lists: &[This]) {
     if env_set!("VICTORY_TRACE_WRITES") {
@@ -278,54 +286,90 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
     static ORDER: Mutex<()> = Mutex::new(());
     let entry = std::time::Instant::now();
     let ordering = std::time::Instant::now();
+    super::hosttime::enter(super::hosttime::Phase::Order);
     let _order = ORDER.lock().unwrap_or_else(|e| e.into_inner());
     let order_wait = ordering.elapsed();
+    super::hosttime::enter(super::hosttime::Phase::Prepare);
     // Tests share one title and count the uploads of their own `sync_dirty` calls, which another
     // test's submission with textures read but not yet uploaded would upset: there the lock is
     // kept from the probes to the uploads (`Title::submit`).
     let unlocked = !cfg!(test);
-    // The lists' snapshots hold `Rc`s the recording threads share: they are taken and dropped
-    // under the title lock, once here and once for the submission below.
-    let segments = |t: &MetalTitle| {
-        let mut segments = Vec::new();
-        for &l in lists.iter().filter(|l| !l.is_null()) {
-            let list = crate::list::native(l);
-            segments.extend(list.lock().unwrap_or_else(|e| e.into_inner()).segments(t));
-        }
-        segments
-    };
     let mut named = Default::default();
     let mut prepare = std::time::Duration::ZERO;
     let mut apply = std::time::Duration::ZERO;
     let mut apply_wait = std::time::Duration::ZERO;
-    // A `with_title` in the phases below: its time split into waiting for the host's lock and
-    // working under it (the trace's `apply_wait_ms` and `encode_wait_ms`).
-    let mut timed = |f: &mut dyn FnMut(&mut MetalTitle)| {
-        let started = std::time::Instant::now();
-        let r = with_title(f);
-        (r, started.elapsed(), super::hosttime::last_wait())
-    };
-    let mut jobs = Vec::new();
-    if unlocked {
-        let (_, took, waited) = timed(&mut |t| {
-            if t.names_wanted() {
-                named = t.keep_named(segments(t).iter().map(|(l, _)| l));
+    // The lists hold `Rc`s the recording threads share, so they are taken under the title lock --
+    // once, moved out rather than copied (`TitleList::take_segments`): the segment copies were the
+    // frame's `malloc` time on the render thread, under this lock.
+    let mut segments = Vec::new();
+    {
+        let (taken, took, waited) = timed_body(|t| {
+            let mut out = Vec::new();
+            for &l in lists.iter().filter(|l| !l.is_null()) {
+                let list = crate::list::native(l);
+                let mut list = list.lock().unwrap_or_else(|e| e.into_inner());
+                out.extend(list.take_segments(t));
             }
-            jobs = t.sync_jobs();
+            out
         });
         apply += took;
         apply_wait += waited;
-        for batch in super::textures::batches(jobs) {
-            // Without the lock: the title's other threads go on recording.
-            let read = std::time::Instant::now();
-            let prepared = super::textures::prepare(&batch);
-            prepare += read.elapsed();
-            let started = std::time::Instant::now();
-            with_title(|t| t.sync_apply(prepared));
-            apply += started.elapsed();
-            apply_wait += super::hosttime::last_wait();
+        segments = taken.unwrap_or_default();
+    }
+    let mut jobs = Vec::new();
+    if unlocked {
+        // What the frame has left for textures ([`textures::FRAME_TEXTURE_WORK`]): once spent,
+        // this submission's textures are left for the next frame rather than holding this one
+        // past the title's watchdog.
+        let left = with_title(|t| t.texture_work_left(super::textures::FRAME_TEXTURE_WORK));
+        if left.is_some_and(|left| left.is_zero()) {
+            super::hosttime::sync_deferred();
+            let (_, took, waited) = timed_body(|t| {
+                if t.names_wanted() {
+                    named = t.keep_named(segments.iter().map(|(l, _)| l));
+                }
+            });
+            apply += took;
+            apply_wait += waited;
+        } else {
+            super::hosttime::enter(super::hosttime::Phase::Apply);
+            let (_, took, waited) = timed_body(|t| {
+                if t.names_wanted() {
+                    named = t.keep_named(segments.iter().map(|(l, _)| l));
+                }
+                jobs = t.sync_jobs();
+            });
+            apply += took;
+            apply_wait += waited;
+            with_title(|t| t.spent_texture_work(took));
+            let mut batches = super::textures::batches(jobs).into_iter();
+            let mut deferred = Vec::new();
+            while let Some(batch) = batches.next() {
+                if with_title(|t| t.texture_work_left(super::textures::FRAME_TEXTURE_WORK)).is_some_and(|left| left.is_zero()) {
+                    deferred.extend(batch);
+                    deferred.extend(batches.by_ref().flatten());
+                    break;
+                }
+                // Without the lock: the title's other threads go on recording.
+                super::hosttime::enter(super::hosttime::Phase::Prepare);
+                let read = std::time::Instant::now();
+                let prepared = super::textures::prepare(&batch);
+                prepare += read.elapsed();
+                with_title(|t| t.spent_texture_work(read.elapsed()));
+                super::hosttime::enter(super::hosttime::Phase::Apply);
+                let started = std::time::Instant::now();
+                with_title(|t| t.sync_apply(prepared));
+                apply += started.elapsed();
+                apply_wait += super::hosttime::last_wait();
+                with_title(|t| t.spent_texture_work(started.elapsed()));
+            }
+            if !deferred.is_empty() {
+                super::hosttime::sync_deferred();
+                with_title(|t| t.defer_reads(deferred));
+            }
         }
     }
+    super::hosttime::enter(super::hosttime::Phase::Encode);
     let encoding = std::time::Instant::now();
     with_title(|t| {
         // What the GPU drew, cleared or wrote through views is no longer filled from title
@@ -338,7 +382,6 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
             t.let_named_go(named);
             return;
         }
-        let segments = segments(t);
         if unlocked {
             t.submit_synced(queue as usize, segments);
         } else {
@@ -360,6 +403,7 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
         encode_wait: super::hosttime::last_wait(),
         wall: entry.elapsed(),
     });
+    super::hosttime::leave();
 }
 
 pub(crate) fn queue_signal(queue: This, fence: This, value: u64) {
@@ -996,6 +1040,7 @@ fn frame_line() {
         pipes_made = h.pipes_made,
         pipes_ms = ms(h.pipes_us),
         tex_batches = h.sync_batches,
+        tex_deferred = h.sync_deferred,
         tex = h.sync_textures,
         tex_first = h.sync_first,
         tex_same = h.sync_unchanged,
@@ -1063,6 +1108,10 @@ pub(crate) fn present(queue: This, planes: &[This]) {
     }
     if tracing_record_writers() {
         trace_record_writers();
+    }
+    #[cfg(target_os = "macos")]
+    if super::gpu_vertex_trace::on() {
+        super::gpu_vertex_trace::present();
     }
     super::rt::present();
     dump_depth_targets();
@@ -1165,8 +1214,9 @@ pub(crate) fn buffer_created(res: This, addr: u64, len: u64, own: bool) {
 pub(crate) fn pipeline_released(pipeline: This) {
     let key = pipeline as usize;
     with_title(|t| {
-        t.pipelines.remove(&key);
-        t.console_pipes.retain(|(k, _), _| *k != key);
+        t.pipelines.retain(|(k, _), _| *k != key);
+        t.console_pipes.retain(|(k, _, _), _| *k != key);
+        t.pipeline_streams.remove(&key);
         t.thread_pipes.remove(&key);
     });
 }
@@ -1469,13 +1519,56 @@ pub(crate) fn set_pipeline(this: This, pipeline: This) {
     with_list(this, |_, l| l.pipeline = pipeline as usize);
 }
 
-/// The host pipeline of title pipeline `key` for a draw into `targets`, made at first use. A
-/// console pipeline's state names no target formats, so it is made again for each set of targets.
+/// The signature of the strides a described pipeline's streams step by for this draw: for each
+/// stream of its input layout, the slot and the stride (the bound view's, or where the layout's
+/// elements end when the draw bound none). Metal's vertex descriptor holds those strides, so the
+/// host pipeline is made per signature; two draws whose views step differently in the same slot of
+/// the same pipeline must not share one. 0 for a pipeline with no stage-in inputs.
+fn stream_signature(t: &mut MetalTitle, key: usize, strides: &[u32]) -> u64 {
+    if !t.pipeline_streams.contains_key(&key) {
+        // Once a pipeline: its layout's own stream ends (a guessed pipeline's come from its draw,
+        // and it caches per strides itself).
+        let streams = crate::pipeline::native_stages(key as This)
+            .and_then(|(_, graphics)| graphics)
+            .filter(|g| !g.is_guessed() && !g.inputs().is_empty())
+            .map(|g| {
+                g.stream_strides()
+                    .into_iter()
+                    .map(|(slot, stride, _)| (slot as u32, stride as u32))
+                    .collect()
+            })
+            .unwrap_or_default();
+        t.pipeline_streams.insert(key, streams);
+    }
+    strides_signature(t.pipeline_streams.get(&key).map(Vec::as_slice).unwrap_or(&[]), strides)
+}
+
+/// [`stream_signature`]'s hash for a pipeline whose streams are `record` (slot, layout end) and
+/// whose draw bound `strides`: 0 when the pipeline reads no stage-in inputs.
+fn strides_signature(record: &[(u32, u32)], strides: &[u32]) -> u64 {
+    const MAX_STRIDE: u32 = 4096;
+    if record.is_empty() {
+        return 0;
+    }
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &(slot, layout_end) in record {
+        let bound = strides.get(slot as usize).copied().unwrap_or(0);
+        let stride = if bound == 0 || bound > MAX_STRIDE { layout_end } else { bound };
+        h = (h ^ (u64::from(slot) << 32 | u64::from(stride))).wrapping_mul(0x100_0000_01b3);
+    }
+    h
+}
+
+/// The host pipeline of title pipeline `key` for a draw into `targets` with `strides` bound, made
+/// at first use. A console pipeline's state names no target formats, so it is made again for each
+/// set of targets; and a described pipeline's vertex descriptor names the strides its streams
+/// step by, so it is made again for each set of strides the draw bound. Both are part of the key.
 fn pipe(t: &mut MetalTitle, key: usize, targets: &TargetFormats, strides: &[u32]) -> Pipe<Metal> {
-    if let Some(p) = t.pipelines.get(&key) {
+    let geometry = stream_signature(t, key, strides);
+    if let Some(p) = t.pipelines.get(&(key, geometry)) {
         return p.clone();
     }
-    let console_key = (key, targets.clone());
+    let console_key = (key, targets.clone(), geometry);
     if let Some(p) = t.console_pipes.get(&console_key) {
         return p.clone();
     }
@@ -1505,16 +1598,18 @@ fn pipe(t: &mut MetalTitle, key: usize, targets: &TargetFormats, strides: &[u32]
         return Pipe::Refused;
     }
     // A pipeline Metal is still compiling when the budget ends is put off the same way.
+    super::hosttime::enter(super::hosttime::Phase::Pipeline);
     t.compile_wait = compile_wait(t);
     let put_off = t.shaders.put_off;
     let (made, console) = make_pipe(t, key, targets, strides);
+    super::hosttime::leave();
     if t.shaders.put_off != put_off {
         return made;
     }
     if console {
         t.console_pipes.insert(console_key, made.clone());
     } else {
-        t.pipelines.insert(key, made.clone());
+        t.pipelines.insert((key, geometry), made.clone());
     }
     made
 }
@@ -1720,23 +1815,53 @@ static PASS_KEYS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 thread_local! { static LAST_WHY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") }; }
 
 /// `VICTORY_TRACE_PASSES`' value: the folder for images, how many world presents to let pass
-/// first, and how many presents the window lasts after the one that opens it.
-fn pass_config(v: &str) -> (String, u64, i64) {
+/// first, how many presents the window lasts after the one that opens it, and (optional) a
+/// frame number the window opens at instead of after `skip` world presents. A script that wants
+/// the world frame cannot count presents: the loading screens present thousands of times, and
+/// which of their presents counts as a "world" one (500 draws or more since the last) depends
+/// on how the machine happened to schedule the load. The title's frame number is the same from
+/// run to run, so `...,<frame>` opens the window at the first present at or after that frame
+/// (`0` or absent: the presents count only).
+fn pass_config(v: &str) -> (String, u64, i64, Option<u64>) {
     let mut parts = v.split(',');
     let dir = parts.next().filter(|d| !d.is_empty()).unwrap_or(".").to_owned();
     let skip = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(100);
     let presents = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(4);
-    (dir, skip, presents)
+    let frame = parts.next().and_then(|s| s.trim().parse().ok()).filter(|&f| f > 0);
+    (dir, skip, presents, frame)
 }
 
 #[cfg(test)]
 #[test]
 fn pass_trace_reads_its_switch_and_stays_off_without_it() {
-    assert_eq!(pass_config("/tmp/p,8,5"), ("/tmp/p".into(), 8, 5));
-    assert_eq!(pass_config("/tmp/p"), ("/tmp/p".into(), 100, 4));
-    assert_eq!(pass_config(",x,"), (".".into(), 100, 4));
+    assert_eq!(pass_config("/tmp/p,8,5"), ("/tmp/p".into(), 8, 5, None));
+    assert_eq!(pass_config("/tmp/p"), ("/tmp/p".into(), 100, 4, None));
+    assert_eq!(pass_config(",x,"), (".".into(), 100, 4, None));
+    assert_eq!(pass_config("/tmp/p,8,5,1900"), ("/tmp/p".into(), 8, 5, Some(1900)));
+    assert_eq!(pass_config("/tmp/p,8,5,0"), ("/tmp/p".into(), 8, 5, None), "0: no frame");
     // No test sets `VICTORY_TRACE_PASSES`, so the window never opens and nothing is noted.
     assert!(!pass_on());
+}
+
+/// Whether the pass trace's window opens at a present: at or after `frame` when one is given,
+/// else once `world` presents that recorded 500 draws or more have gone by.
+fn pass_opens(world: u64, skip: u64, frame: Option<u64>, now_frame: u64) -> bool {
+    match frame {
+        Some(frame) => now_frame >= frame,
+        None => world >= skip,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn pass_trace_opens_on_a_frame_number_or_a_count_of_world_presents() {
+    // A frame number is exact: the window is closed before it and open from it on.
+    assert!(!pass_opens(9999, 0, Some(1900), 1899));
+    assert!(pass_opens(0, 100, Some(1900), 1900));
+    assert!(pass_opens(0, 100, Some(1900), 2200));
+    // No frame: the count of world presents, as before.
+    assert!(!pass_opens(2, 3, None, 5000));
+    assert!(pass_opens(3, 3, None, 5000));
 }
 
 fn pass_tex(k: usize) -> String {
@@ -1750,7 +1875,21 @@ fn pass_tex(k: usize) -> String {
 fn pass_note(t: &MetalTitle, l: &mut MetalList, kind: &str, outcome: &str, compute: bool, n: u32) {
     let sh = stage_hashes(l.pipeline);
     let (reads, writes, none, keys) = if compute {
-        t.host.pass_views(l.list.compute_args(), &[])
+        // A dispatch's tables are read to the entries its shader names, as a draw's are: a
+        // bindless compute can name a hundred entries, and the ones a shadow pass reads (its
+        // cascades, its depth) are not always in the first few.
+        let (root, binding) = (l.list.compute_args(), l.list.compute_binding());
+        let mut limits: Vec<(u8, usize)> = Vec::new();
+        if let Some(b) = binding.filter(|_| outcome.starts_with("ran")) {
+            limits.extend(b.table_entries.iter().copied());
+            // A slot the shader names no entry of: the pass trace's own floor (24).
+            for slot in 0..root.len() {
+                if !limits.iter().any(|(s, _)| *s as usize == slot) {
+                    limits.push((slot as u8, 24));
+                }
+            }
+        }
+        t.host.pass_views(root, &limits)
     } else {
         let (root, binding) = l.list.graphics_args();
         let mut limits: Vec<(u8, usize)> = Vec::new();
@@ -1791,13 +1930,13 @@ fn pass_present(resource: This) {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     static LEFT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
     static NUM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static CONFIG: OnceLock<Option<(String, u64, i64)>> = OnceLock::new();
-    let Some((dir, skip, presents)) =
+    static CONFIG: OnceLock<Option<(String, u64, i64, Option<u64>)>> = OnceLock::new();
+    let Some((dir, skip, presents, frame)) =
         CONFIG.get_or_init(|| std::env::var("VICTORY_TRACE_PASSES").ok().map(|v| pass_config(&v)))
     else {
         return;
     };
-    let (skip, presents) = (*skip, *presents);
+    let (skip, presents, frame) = (*skip, *presents, *frame);
     let num = NUM.fetch_add(1, Ordering::Relaxed);
     let now = START.get_or_init(std::time::Instant::now).elapsed().as_secs();
     let left = LEFT.load(Ordering::Relaxed);
@@ -1809,10 +1948,10 @@ fn pass_present(resource: This) {
         WORLD.fetch_add(1, Ordering::Relaxed);
     }
     if left == i64::MIN {
-        if WORLD.load(Ordering::Relaxed) >= skip {
+        if pass_opens(WORLD.load(Ordering::Relaxed), skip, frame, crate::frame::current()) {
             LEFT.store(presents, Ordering::Relaxed);
             super::PASS_ON.store(true, Ordering::Relaxed);
-            eprintln!("PASSWINDOW start present={num} t={now}");
+            eprintln!("PASSWINDOW start present={num} t={now} frame={}", crate::frame::current());
         }
         return;
     }
@@ -2095,6 +2234,16 @@ fn make_pipe(
         return (Pipe::Refused, false);
     };
     let graphics = graphics.map(|g| {
+        // The layout's own stream ends, before a draw's strides change them: what a host
+        // pipeline's vertex descriptor must be made for (`stream_signature`).
+        if !g.is_guessed() && !g.inputs().is_empty() {
+            let streams: Vec<(u32, u32)> = g
+                .stream_strides()
+                .into_iter()
+                .map(|(slot, stride, _)| (slot as u32, stride as u32))
+                .collect();
+            t.pipeline_streams.insert(key, streams);
+        }
         let g = g.with_strides(strides);
         if g.names_targets() {
             (g, false)
@@ -2242,7 +2391,7 @@ pub fn shader_stats() -> Option<super::shaders::ShaderStats> {
 pub fn install_compute_pipeline(key: usize, dxil: &[u8], threads: [usize; 3]) -> Result<(), String> {
     with_title(|t| {
         let pso = t.host.compute_pipeline(dxil, threads)?;
-        t.pipelines.insert(key, Pipe::Compute(pso));
+        t.pipelines.insert((key, 0), Pipe::Compute(pso));
         Ok(())
     })
     .unwrap_or_else(|| Err("no native host GPU".into()))
@@ -2254,7 +2403,7 @@ pub(crate) fn install_test_render_pipeline(
     pso: Rc<<Metal as victory_backend::resources::GraphicsBackend>::RenderPipeline>,
 ) {
     with_title(|t| {
-        t.pipelines.insert(key, Pipe::Render(pso, None));
+        t.pipelines.insert((key, 0), Pipe::Render(pso, None));
     });
 }
 
@@ -2348,6 +2497,8 @@ fn dropped_dispatch(t: &MetalTitle, l: &mut MetalList, how: &str) {
     }
     dropped("a dispatch without a host compute pipeline");
     drop_shaders(l.pipeline, true);
+    #[cfg(target_os = "macos")]
+    trace_dropped_writes(t, l);
     if pass_on() {
         pass_note(t, l, &format!("dispatch {how}"), "a dispatch without a host compute pipeline", true, 1);
     }
@@ -2364,6 +2515,15 @@ fn dropped_dispatch(t: &MetalTitle, l: &mut MetalList, how: &str) {
             })
             .collect();
         trace_drop_pipe(format!("{:?} {how} uavs {uavs:?}", stage_hashes(l.pipeline)));
+    }
+}
+
+/// `VICTORY_TRACE_GPU_VERTICES`: what a dispatch dropped for want of a host compute pipeline
+/// may have written this frame, for the draws that read it (`gpu_vertex_trace`).
+#[cfg(target_os = "macos")]
+fn trace_dropped_writes(t: &MetalTitle, l: &MetalList) {
+    if super::gpu_vertex_trace::on() {
+        super::gpu_vertex_trace::dropped_dispatch(&t.host, l.list.compute_args(), &stage_hashes(l.pipeline).join(" "));
     }
 }
 
@@ -2465,6 +2625,8 @@ pub(crate) fn dispatch_threads(this: This, threads: [u32; 3]) {
             _ => {
                 dropped("a dispatch of thread counts without a host compute pipeline");
                 drop_shaders(l.pipeline, true);
+                #[cfg(target_os = "macos")]
+                trace_dropped_writes(t, l);
                 if pass_on() {
                     pass_note(t, l, &format!("dispatch-threads{threads:?}"), "a dispatch of thread counts without a host compute pipeline", true, 1);
                 }
@@ -2654,6 +2816,37 @@ fn graphics_inner(t: &mut MetalTitle, l: &mut MetalList, mesh: bool) -> Option<b
     // pipeline has no fourth-corner shader translation, so it falls back to its supplied vertices
     // drawn as triangles rather than issuing 4-vertex instanced strips.
     let rect = l.topology == 17;
+    // `VICTORY_TRACE_GAP_VIEWS=1`: once a pipeline, whether a draw binds a heap holding buffer
+    // views the host shows as a wrap of mapped title pages (or, before the prefix fix, as the null
+    // view), with the pipeline's shaders -- which says whether the world's GPU-driven programs
+    // read the streamed buffers whose ranges have gaps.
+    if env_set!("VICTORY_TRACE_GAP_VIEWS") {
+        static SEEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let key = l.pipeline as usize;
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.len() < 400 && !seen.contains(&key) {
+            if let Some(h) = l.list.bound_heaps().0 {
+                let views = h.title_views.borrow();
+                if !views.is_empty() {
+                    seen.push(key);
+                    let wraps: Vec<(usize, u64, u64)> = views
+                        .iter()
+                        .map(|(&i, &(a, l, _))| (i, a, l))
+                        .take(8)
+                        .collect();
+                    tracing::info!(
+                        pipeline = key,
+                        shaders = ?stage_hashes(l.pipeline),
+                        heap = format!("{:#x}", h.start),
+                        entries = h.count,
+                        wrapped_views = views.len(),
+                        ?wraps,
+                        "a draw binds a heap with buffer views over title pages"
+                    );
+                }
+            }
+        }
+    }
     let targets = l.targets.clone();
     let (made, rect) = match pipe(t, l.pipeline, &targets, &l.strides) {
         Pipe::Guess(g) => (guess(t, l, &g, rect), rect),
@@ -2838,22 +3031,34 @@ fn topology_name(t: victory_backend::resources::Topology) -> &'static str {
     }
 }
 
-/// `VICTORY_TRACE_INDEX=<draws>`: for the first `<draws>` direct indexed draws, reads back the
-/// indices the draw will fetch, at the width the host bound and at the other one, and the vertices
-/// each bound stream can hold (`view size / stride`). A 32-bit index buffer the host reads as 16
-/// bits (or the reverse) draws a mesh as a lattice of long thin triangles: every index becomes two
-/// 16-bit ones, and each pair joins vertices far apart in the mesh. One line a draw.
+/// `VICTORY_TRACE_INDEX`'s value: how many direct indexed draws to trace, and how many seconds
+/// after the first one to start (`None`: off). The seconds let a trace of the world skip the
+/// boot's and the menu's draws, which would spend the count before the content is drawn.
+fn index_trace_config(v: &str) -> Option<(u32, u64)> {
+    let mut parts = v.split(',');
+    let limit: u32 = parts.next()?.trim().parse().ok()?;
+    let after: u64 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    (limit > 0).then_some((limit, after))
+}
+
+/// `VICTORY_TRACE_INDEX=<draws>[,<seconds>]`: for the first `<draws>` direct indexed draws from
+/// `<seconds>` after the first one, reads back the indices the draw will fetch, at the width the
+/// host bound and at the other one, and the vertices each bound stream can hold (`view size /
+/// stride`). A 32-bit index buffer the host reads as 16 bits (or the reverse) draws a mesh as a
+/// lattice of long thin triangles: every index becomes two 16-bit ones, and each pair joins
+/// vertices far apart in the mesh. One line a draw.
 fn trace_index(l: &MetalList, indices: u32, first: u32) {
     use std::sync::atomic::{AtomicU32, Ordering};
-    static LIMIT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    let Some(limit) = *LIMIT.get_or_init(|| {
-        std::env::var("VICTORY_TRACE_INDEX")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n| n > 0)
+    static CONFIG: std::sync::OnceLock<Option<(u32, u64)>> = std::sync::OnceLock::new();
+    let Some((limit, after)) = *CONFIG.get_or_init(|| {
+        index_trace_config(&std::env::var("VICTORY_TRACE_INDEX").ok()?)
     }) else {
         return;
     };
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    if START.get_or_init(std::time::Instant::now).elapsed().as_secs() < after {
+        return;
+    }
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     if n >= limit || indices == 0 {
@@ -3620,6 +3825,50 @@ pub fn render_target_shapes() -> Vec<(u64, u64, u32, u32, u32, u32, bool)> {
 /// Counters of the host for tests and the frame line.
 pub fn stats() -> Option<super::title::Stats> {
     with_title(|t| t.stats.clone())
+}
+
+#[cfg(test)]
+mod index_trace_tests {
+    use super::{index_trace_config, strides_signature};
+
+    /// The index trace takes a count, and optionally a delay so a world trace skips the boot's
+    /// draws; a zero count or a value that is not a count leaves it off.
+    #[test]
+    fn the_index_trace_takes_a_count_and_a_delay() {
+        assert_eq!(index_trace_config("500"), Some((500, 0)));
+        assert_eq!(index_trace_config("12,300"), Some((12, 300)));
+        assert_eq!(index_trace_config(" 8 , 470 "), Some((8, 470)));
+        // A delay that is not a number starts at once, as the vertex dump's does.
+        assert_eq!(index_trace_config("4,later"), Some((4, 0)));
+        assert_eq!(index_trace_config("0"), None);
+        assert_eq!(index_trace_config("0,300"), None);
+        assert_eq!(index_trace_config(""), None);
+        assert_eq!(index_trace_config("many"), None);
+    }
+
+    /// A host pipeline's vertex descriptor holds its streams' strides, so two draws whose bound
+    /// strides step a stream differently get different host pipelines; a slot the layout does not
+    /// read, or a stride the assembler would not take (0, or past its limit), changes nothing.
+    #[test]
+    fn a_pipeline_gets_a_host_pipeline_per_stride_its_draws_bind() {
+        // The layout: slot 0's elements end at 32 bytes, slot 1's at 12.
+        let record = [(0u32, 32u32), (1, 12)];
+        let sig = |strides: &[u32]| strides_signature(&record, strides);
+        assert_eq!(sig(&[32, 12]), sig(&[32, 12]));
+        // The same PSO drawn with a shorter or a longer vertex view is another pipeline: Metal's
+        // descriptor would otherwise keep the stride of whichever draw made it.
+        assert_ne!(sig(&[32, 12]), sig(&[24, 12]));
+        assert_ne!(sig(&[32, 12]), sig(&[40, 12]));
+        // A bound buffer the layout does not read is no variant.
+        assert_eq!(sig(&[32, 12, 64]), sig(&[32, 12]));
+        // A slot the draw bound no stride for (0), or a junk one past the assembler's limit, steps
+        // by the layout's elements, so it is the same pipeline as the layout's own end.
+        assert_eq!(sig(&[0, 12]), sig(&[32, 12]));
+        assert_eq!(sig(&[0xFFFF_FFFF, 12]), sig(&[32, 12]));
+        // A pipeline with no stage-in inputs has one host pipeline whatever is bound.
+        assert_eq!(strides_signature(&[], &[32, 12]), 0);
+        assert_eq!(strides_signature(&[], &[]), 0);
+    }
 }
 
 #[cfg(test)]

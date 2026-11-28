@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use victory_backend::backend::{Dispatch, Heaps, RootArgs};
+use victory_metal::mem::PageMap;
 use victory_backend::resources::*;
 
 #[cfg(test)]
@@ -30,6 +31,11 @@ type Resolved<Buf> = (Rc<Buf>, *const u8, Option<u64>);
 /// mappings they were made over, the pool-table generation that signature was taken at, when they
 /// were last used, and the buffer.
 type TitleAliases<Buf> = RefCell<HashMap<(u64, u64), (u64, u64, u64, Rc<Buf>)>>;
+
+/// Wraps over a private page range ([`NativeHost::title_holes`]), by page-aligned range: the page
+/// signature, the pool-table generation it was taken at, when last used, the buffer and the pages
+/// it was made over (which must live while the buffer does).
+type HoleWraps<Buf> = RefCell<HashMap<(u64, u64), (u64, u64, u64, Rc<Buf>, Rc<PageMap>)>>;
 
 /// Draws in the passes submitted to the GPU so far, read lock-free by the window's HUD.
 static DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -49,6 +55,9 @@ pub struct NativeHost<B: GraphicsBackend> {
     buffers: RefCell<HashMap<usize, Rc<B::Buffer>>>,
     /// Buffers over the title's own addresses, by page-aligned range ([`Self::title_alias`]).
     aliases: TitleAliases<B::Buffer>,
+    /// Buffers over a private page range for views whose title range has holes
+    /// ([`Self::title_holes`]).
+    hole_wraps: HoleWraps<B::Buffer>,
     /// The pool table's mappings as [`Self::mapping_list`] last read them, and their generation.
     maps: RefCell<Option<(u64, Rc<[Mapping]>)>>,
     /// Pools released whose buffers went, not yet taken by [`Self::released_pools`].
@@ -259,6 +268,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             memory,
             buffers: RefCell::default(),
             aliases: RefCell::default(),
+            hole_wraps: RefCell::default(),
             released: RefCell::default(),
             followed: Cell::new(0),
             maps: RefCell::default(),
@@ -412,6 +422,20 @@ impl<B: GraphicsBackend> NativeHost<B> {
         // (dropping them all made a new 174 MB wrap at each release, while the old ones stayed
         // alive in the heap entries and in-flight work: Metal's count rose by gigabytes).
         self.aliases.borrow_mut().retain(|&(base, end), (sig, _, _, _)| self.memory.signature(base, end - base) == Some(*sig));
+        // A page range over a released pool's pages is made again from the pages that are there now.
+        let mut holes = self.hole_wraps.borrow_mut();
+        let stale: Vec<(u64, u64)> = holes
+            .iter()
+            .filter(|((base, end), (sig, _, _, _, _))| {
+                self.memory
+                    .page_map(*base, end - base, 1 << 14)
+                    .is_some_and(|(now, _)| now != *sig)
+            })
+            .map(|(&range, _)| range)
+            .collect();
+        for range in stale {
+            holes.remove(&range);
+        }
         let mut buffers = self.buffers.borrow_mut();
         let mut c = self.contract.borrow_mut();
         for &id in &gone {
@@ -436,12 +460,10 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// pool pages (#258); the null view gave them zeros. A wrap is reused while the mappings under
     /// it are the same ([`PoolTable::signature`]), made again when they change; every wrap a heap
     /// entry shows is kept and 64 others at most, and those over a released pool's pages are
-    /// dropped. A range with a gap stays the null view. A wrap keeps
+    /// dropped. A range with a gap is served by [`Self::title_prefix`] where it has a mapped
+    /// prefix, and is the null view otherwise. A wrap keeps
     /// the physical pages it was made over, so the heap entries that show one are mirrored again
     /// when the title's mappings under them change ([`Self::follow_title_pages`]).
-    // shortcut: a range partly unmapped is the null view as a whole (zeros), where a reserved
-    // resource reads zeros only at its unmapped tiles (D3D12 tier 2); give such a range a wrap of
-    // its own with zero pages in the holes if a title reads a view it maps sparsely.
     fn title_alias(&self, addr: u64, len: u64) -> Option<(Rc<B::Buffer>, *const u8, u64)> {
         // Wraps kept for reuse: the heap entries that show one keep it alive themselves. Large
         // wraps (16 MiB and up) are bounded; small ones (stage-in vertex and index buffers, blit
@@ -464,10 +486,46 @@ impl<B: GraphicsBackend> NativeHost<B> {
             return Some((b.clone(), addr as *const u8, *sig));
         }
         let Some(sig) = self.memory.signature(base, end - base) else {
-            // A real gap: the title maps nothing at part of the view. It stays the null view.
-            static GAPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if GAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64 {
-                tracing::info!(addr = format!("{addr:#x}"), len, "a buffer view over title memory with a gap stays the null view");
+            // A real gap. How many there are, and whether one is partial (mapped pages after the
+            // first hole, which only a page-by-page view can serve) or wholly unmapped, is what
+            // says whether serving mapped pages matters at all: the first ones logged are counted
+            // in full, the rest only in the totals.
+            static GAPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static PARTIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static MIDDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let total = GAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let layout = self
+                .memory
+                .page_map(base, end - base, 1 << 14)
+                .map(|(_, sources)| {
+                    let mapped = sources.iter().filter(|s| s.is_some()).count();
+                    let prefix = sources.iter().take_while(|s| s.is_some()).count();
+                    (mapped, sources.len(), mapped - prefix)
+                })
+                .unwrap_or((0, ((end - base) / (1 << 14)) as usize, 0));
+            if layout.0 > 0 {
+                PARTIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if layout.2 > 0 {
+                MIDDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if total <= 64 {
+                tracing::info!(
+                    addr = format!("{addr:#x}"),
+                    len,
+                    mapped_pages = layout.0,
+                    pages = layout.1,
+                    mapped_past_the_first_hole = layout.2,
+                    "a buffer view over title memory with a gap is not one title run"
+                );
+            }
+            if total.is_power_of_two() {
+                tracing::info!(
+                    views = total,
+                    partially_mapped = PARTIAL.load(std::sync::atomic::Ordering::Relaxed),
+                    with_a_page_past_the_hole = MIDDLE.load(std::sync::atomic::Ordering::Relaxed),
+                    "buffer views over title memory with gaps so far"
+                );
             }
             return None;
         };
@@ -535,6 +593,118 @@ impl<B: GraphicsBackend> NativeHost<B> {
         Some((buf, addr as *const u8, sig))
     }
 
+    /// A buffer over a private page range showing `[addr, addr + len)` page by page: each 16 KiB
+    /// page the title maps is shared with its own address (a remap, not a copy), and a hole shows
+    /// zeros ([`PageMap`]). This is D3D12 tier 2's shape for a reserved resource: zeros only in the
+    /// unmapped tiles, the rest real -- where the null view read zeros for the whole range and the
+    /// mapped prefix alone lost every page after the first hole. The pages are kept by the wrap's
+    /// cache while a heap entry shows it. `None` when the range is too large, has no mapped page,
+    /// or the remap fails (the caller then shows the mapped prefix, clamped).
+    fn title_holes(
+        &self,
+        addr: u64,
+        len: u64,
+        writable: bool,
+    ) -> Option<(Rc<B::Buffer>, *const u8, u64)> {
+        const PAGE: u64 = 1 << 14;
+        const MAX: u64 = 64 << 20;
+        static USE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let (base, end) = Self::alias_range(addr, len)?;
+        if end - base > MAX {
+            return None;
+        }
+        let generation = self.memory.generation();
+        let now = USE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut wraps = self.hole_wraps.borrow_mut();
+        if let Some((sig, made, used, b, pages)) = wraps.get_mut(&(base, end))
+            && *made == generation
+        {
+            let sig = *sig;
+            let ptr = unsafe { pages.ptr.add((addr - base) as usize) }.cast_const();
+            *used = now;
+            return Some((b.clone(), ptr, sig));
+        }
+        let (sig, sources) = self.memory.page_map(base, end - base, PAGE as usize)?;
+        if let Some((was, made, used, b, pages)) = wraps.get_mut(&(base, end)) {
+            let ptr = unsafe { pages.ptr.add((addr - base) as usize) }.cast_const();
+            *used = now;
+            if *was == sig {
+                *made = generation;
+                return Some((b.clone(), ptr, sig));
+            }
+            // The title's pages under the range changed: remap them in place, so the buffer the
+            // entries show keeps its address (a new one would leave in-flight work reading pages
+            // this one would free).
+            if let Some(pages) = Rc::get_mut(pages) {
+                if pages.refresh(PAGE as usize, !writable, |k| sources[k]).is_ok() {
+                    *was = sig;
+                    *made = generation;
+                    return Some((b.clone(), ptr, sig));
+                }
+            }
+        }
+        let pages = PageMap::new((end - base) as usize, PAGE as usize, !writable, |k| sources[k]).ok()?;
+        let buf = Rc::new(self.backend.wrap_title_memory(pages.ptr, pages.len).ok()?);
+        // The view's start inside the private range (the wrap is not at the title's addresses).
+        let ptr = unsafe { pages.ptr.add((addr - base) as usize) }.cast_const();
+        // Keep the wrap while a heap entry shows it; drop the least recently used other past 512,
+        // since dropping one a GPU still reads would free the pages under its buffer.
+        if wraps.len() >= 512 {
+            let shown: std::collections::HashSet<(u64, u64)> = self
+                .heaps
+                .borrow()
+                .iter()
+                .flat_map(|h| h.title_views.borrow().values().filter_map(|&(a, l, _)| Some(Self::alias_range(a, l)?)).collect::<Vec<_>>())
+                .collect();
+            if let Some(oldest) = wraps
+                .iter()
+                .filter(|(range, _)| !shown.contains(range))
+                .min_by_key(|(_, (_, _, used, _, _))| *used)
+                .map(|(k, _)| *k)
+            {
+                if let Some((_, _, _, _, pages)) = wraps.remove(&oldest) {
+                    // Work recorded earlier may still read the range: its pages stay mapped for
+                    // the process (a range is a view's size, and few are ever evicted).
+                    std::mem::forget(pages);
+                }
+            }
+        }
+        wraps.insert((base, end), (sig, generation, now, buf.clone(), Rc::new(pages)));
+        Some((buf, ptr, sig))
+    }
+
+    /// The longest mapped prefix of `[addr, addr + len)` that wraps as one title range, with the
+    /// wrap and the bytes it serves: what a heap buffer view whose range has a gap can still show.
+    /// The prefix ends at the last whole 16 KiB page that is mapped; a view of a streamed
+    /// allocation whose tail is not paged in yet therefore reads its resident bytes and zeros
+    /// (through the descriptor's size) past them, instead of zeros throughout. `None` when not
+    /// even the view's first page is mapped.
+    fn title_prefix(&self, addr: u64, len: u64) -> Option<(Rc<B::Buffer>, *const u8, u64, u64)> {
+        const PAGE: u64 = 1 << 14;
+        let (base, end) = Self::alias_range(addr, len)?;
+        // A range is either wholly mapped or not (`PoolTable::signature`), so the mapped prefix
+        // is found by bisection over whole pages.
+        let pages = (end - base) / PAGE;
+        let (mut lo, mut hi) = (0u64, pages);
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if self.memory.signature(base, mid * PAGE).is_some() {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if lo == 0 {
+            return None;
+        }
+        let served = (base + lo * PAGE).saturating_sub(addr).min(len);
+        if served == 0 {
+            return None;
+        }
+        let (buf, ptr, sig) = self.title_alias(addr, served)?;
+        Some((buf, ptr, sig, served))
+    }
+
     /// The whole 16 KiB host pages a wrap of `[addr, addr + len)` covers (the alignment the
     /// no-copy wrap needs, also under Rosetta's 4 KiB pages), as `(start, end)`.
     fn alias_range(addr: u64, len: u64) -> Option<(u64, u64)> {
@@ -552,7 +722,11 @@ impl<B: GraphicsBackend> NativeHost<B> {
         let (base, end) = Self::alias_range(addr, len)?;
         #[cfg(test)]
         SIGNATURES.with(|n| n.set(n.get() + 1));
-        self.memory.signature(base, end - base)
+        // A range with a hole has its own signature: which pages are mapped, and where from, so a
+        // view served page by page ([`Self::title_holes`]) is mirrored again when a hole fills.
+        self.memory
+            .signature(base, end - base)
+            .or_else(|| self.memory.page_map(base, end - base, 1 << 14).map(|(sig, _)| sig))
     }
 
     /// Mirrors again, once per pool-table change and before the work that reads them, the heap
@@ -1506,6 +1680,125 @@ impl<B: GraphicsBackend> NativeHost<B> {
                         (buf, ptr)
                     }
                     Err(e) => {
+                        // A range with a gap: show the pages the title maps, page by page, with
+                        // zeros in the holes (D3D12 tier 2's shape) -- or, where the private page
+                        // range cannot be made, the mapped prefix with the descriptor's size
+                        // clamped to it. The whole range was the null view before, so a streamed
+                        // mesh reading through it got zeros for every vertex -- triangles fanning
+                        // out of one point -- or, with only the prefix, lost every page after its
+                        // first hole.
+                        if addr != 0
+                            && size != 0
+                            && let Some((buf, ptr, sig)) =
+                                self.title_holes(addr, u64::from(size), writable)
+                        {
+                            heap.title_views
+                                .borrow_mut()
+                                .insert(index, (addr, u64::from(size), Some(sig)));
+                            let (is_typed, is_explicit) = match typed_buffer(&view, &resources) {
+                                Some((_, _, explicit)) => (true, explicit),
+                                None => (false, false),
+                            };
+                            heap.typed_pending
+                                .borrow_mut()
+                                .set(index, is_typed, is_explicit);
+                            heap.shows(index, None);
+                            // How many of these there are, and whether a mapped page lies past the
+                            // first hole (which only the page-by-page view serves).
+                            static COUNTED: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            static MIDDLE: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            static SEEN: std::sync::Mutex<Option<std::collections::HashSet<(u64, usize)>>> =
+                                std::sync::Mutex::new(None);
+                            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                            let seen = seen.get_or_insert_default();
+                            let layout = self
+                                .memory
+                                .page_map(addr, u64::from(size), 1 << 14)
+                                .map(|(_, sources)| {
+                                    let mapped = sources.iter().filter(|s| s.is_some()).count();
+                                    let prefix = sources.iter().take_while(|s| s.is_some()).count();
+                                    (mapped, sources.len(), mapped - prefix)
+                                })
+                                .unwrap_or_default();
+                            let fresh = seen.insert((heap.start, index));
+                            if fresh && layout.2 > 0 {
+                                MIDDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            let total = if fresh {
+                                COUNTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+                            } else {
+                                COUNTED.load(std::sync::atomic::Ordering::Relaxed)
+                            };
+                            if fresh && total.is_power_of_two() {
+                                tracing::info!(
+                                    views = total,
+                                    with_a_page_past_the_hole =
+                                        MIDDLE.load(std::sync::atomic::Ordering::Relaxed),
+                                    "buffer views over title memory with holes so far (distinct heap entries)"
+                                );
+                            }
+                            static HOLES: std::sync::atomic::AtomicU32 =
+                                std::sync::atomic::AtomicU32::new(0);
+                            if HOLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64 {
+                                tracing::info!(
+                                    heap = format!("{:#x}", heap.start),
+                                    index,
+                                    addr = format!("{addr:#x}"),
+                                    len = size,
+                                    mapped_pages = layout.0,
+                                    pages = layout.1,
+                                    mapped_past_the_first_hole = layout.2,
+                                    signature = format!("{sig:#x}"),
+                                    "a buffer view over title memory with holes shows its mapped pages, zeros in the holes"
+                                );
+                            }
+                            self.backend
+                                .write_buffer(&heap.heap, index, &buf, ptr, size);
+                            return Ok(true);
+                        }
+                        if addr != 0
+                            && size != 0
+                            && let Some((buf, ptr, sig, served)) =
+                                self.title_prefix(addr, u64::from(size))
+                        {
+                            let was = self.alias_signature(addr, u64::from(size));
+                            heap.title_views
+                                .borrow_mut()
+                                .insert(index, (addr, u64::from(size), was));
+                            if let Some(addresses) = &*heap.addresses.borrow() {
+                                addresses.write_at(
+                                    4 * index,
+                                    &self.address_words_size(Some(&view), Some(served as u32)),
+                                );
+                            }
+                            // A typed view is materialized over the prefix at the next draw
+                            // (`materialize_typed_buffers`), where its width ends with it.
+                            let (is_typed, is_explicit) = match typed_buffer(&view, &resources) {
+                                Some((_, _, explicit)) => (true, explicit),
+                                None => (false, false),
+                            };
+                            heap.typed_pending
+                                .borrow_mut()
+                                .set(index, is_typed, is_explicit);
+                            heap.shows(index, None);
+                            static SERVED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                            if SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64 {
+                                tracing::info!(
+                                    heap = format!("{:#x}", heap.start),
+                                    index,
+                                    addr = format!("{addr:#x}"),
+                                    len = size,
+                                    served,
+                                    signature = format!("{sig:#x}"),
+                                    "a buffer view over title memory with a gap shows its mapped prefix"
+                                );
+                            }
+                            self.backend
+                                .write_buffer(&heap.heap, index, &buf, ptr, served as u32);
+                            return Ok(true);
+                        }
                         // Tried again once the pages under it change: a gap the title maps
                         // later, say ([`Self::follow_title_pages`]).
                         if addr != 0 && size != 0 {
@@ -1877,7 +2170,13 @@ impl<B: GraphicsBackend> NativeHost<B> {
             let resolved = self
                 .resolve(addr, u64::from(size))
                 .ok()
-                .or_else(|| self.title_alias(addr, u64::from(size)).map(|(b, p, _)| (b, p)));
+                .or_else(|| self.title_alias(addr, u64::from(size)).map(|(b, p, _)| (b, p)))
+                // A range with a gap: the typed view over its mapped prefix reads real elements up
+                // to the prefix's end and 0 past it (`write_typed_buffer` clamps the width to the
+                // buffer), where no view at all made every formatted load read 0.
+                .or_else(|| {
+                    self.title_prefix(addr, u64::from(size)).map(|(b, p, _, _)| (b, p))
+                });
             if let Some((buf, ptr)) = resolved
                 && self.backend.write_typed_buffer(
                     &h.heap,
@@ -2211,12 +2510,23 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// and control word (dword 3, [`Self::RAW_CONTROL`]), a texture view's size fields
     /// ([`crate::descriptor::texture_words`]), zeros for anything else.
     fn address_words(&self, view: Option<&crate::descriptor::View>) -> [u32; 4] {
+        self.address_words_size(view, None)
+    }
+
+    /// [`Self::address_words`], with `served` standing for a buffer view's byte size when the
+    /// view shows a mapped prefix of a range with a gap (its record count ends with the prefix).
+    fn address_words_size(
+        &self,
+        view: Option<&crate::descriptor::View>,
+        served: Option<u32>,
+    ) -> [u32; 4] {
         let Some(view) = view else { return [0; 4] };
         if let Some(words) = crate::descriptor::texture_words(view) {
             return words;
         }
         match decode(view, &self.resources.borrow()) {
             Some(Decoded::Buffer { addr, size }) => {
+                let size = served.unwrap_or(size);
                 // RDNA2 buffer descriptor: dword 1 bits 0-15 the address's high bits, bits 16-29
                 // the stride; dword 2 the record count (the byte size for a raw view, whose
                 // stride is 0, as DXIL's `getDimensions` returns it).
@@ -2619,6 +2929,113 @@ impl<B: GraphicsBackend> NativeHost<B> {
         out
     }
 
+    /// `VICTORY_TRACE_GPU_VERTICES`: the ranges of the buffer resources and of the host's own
+    /// buffers, `[start, end)` by start (for sizing root views, which carry no size).
+    #[cfg(target_os = "macos")]
+    pub(super) fn buffer_spans(&self) -> Vec<(u64, u64)> {
+        let mut spans: Vec<(u64, u64)> = self
+            .resources
+            .borrow()
+            .values()
+            .filter_map(|r| match r {
+                Res::Buffer(a, n) if *n > 0 => Some((*a, a.saturating_add(*n))),
+                _ => None,
+            })
+            .chain(self.own.borrow().iter().map(|(&(s, _), &(e, _))| (s, e)))
+            .collect();
+        spans.sort_unstable();
+        spans
+    }
+
+    /// `VICTORY_TRACE_GPU_VERTICES`: the buffer views vertex shader binding `b` reads from `root`:
+    /// its root shader-resource and unordered-access views (and those it reads the address of),
+    /// and the buffer views in the entries its tables reach. A buffer view the host makes no
+    /// buffer of is `null`. shortcut: entries a heap-indexing shader computes are not seen.
+    #[cfg(target_os = "macos")]
+    pub(super) fn vs_views(&self, root: &[Option<Root<B>>], b: &Binding) -> Vec<super::gpu_vertex_trace::VsView> {
+        use super::gpu_vertex_trace::{Via, VsView};
+        use crate::descriptor::View;
+        const BUFFER: u32 = 1;
+        let mut out = Vec::new();
+        let mut slots: Vec<u8> = b
+            .views
+            .iter()
+            .filter(|&&(s, k)| s != victory_shader::emit::VIEW_STRIDES && k != super::list::View::Cbv)
+            .map(|&(s, _)| s)
+            .chain(
+                b.user_data
+                    .iter()
+                    .filter(|u| u.root == victory_shader::RootType::Descriptor && u.slot != victory_shader::emit::DISPATCH_THREADS)
+                    .map(|u| u.slot),
+            )
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        for slot in slots {
+            if let Some(Some(Root::View(a))) = root.get(usize::from(slot)) {
+                out.push(VsView { via: Via::Root(slot), addr: *a, size: 0, null: *a == 0 });
+            }
+        }
+        let resources = self.resources.borrow();
+        for &(slot, count) in &b.table_entries {
+            let Some(Some(Root::Table(h, at))) = root.get(usize::from(slot)) else { continue };
+            if h.kind != HeapKind::Resource {
+                continue;
+            }
+            for index in *at..(*at + count.min(256)).min(h.count) {
+                let Some(view) = crate::descriptor::view(h.start + index as u64 * Self::step(h.kind)) else { continue };
+                let buffer = match &view {
+                    View::Shader(_, Some(d)) | View::Unordered(_, _, Some(d)) => d[1] == BUFFER,
+                    View::Shader(r, None) | View::Unordered(r, _, None) => matches!(resources.get(r), Some(Res::Buffer(..))),
+                    View::Placed(_, res, _) => res[0] == BUFFER,
+                    _ => false,
+                };
+                if !buffer {
+                    continue;
+                }
+                let via = Via::Table(slot, (index - at) as u32);
+                out.push(match decode(&view, &resources) {
+                    Some(Decoded::Buffer { addr, size }) => VsView { via, addr, size: u64::from(size), null: false },
+                    _ => VsView { via, addr: 0, size: 0, null: true },
+                });
+            }
+        }
+        out
+    }
+
+    /// `VICTORY_TRACE_GPU_VERTICES`: how much of `[addr, addr + len)` the title maps, and what
+    /// the host makes of it. A table view over a gap or unmapped memory is the null view
+    /// ([`Self::title_alias`]); a root view (`root`) is resolved at its address alone.
+    #[cfg(target_os = "macos")]
+    pub(super) fn coverage(&self, addr: u64, len: u64, root: bool) -> (u64, &'static str) {
+        let len = len.max(1);
+        let own = |a: u64, n: u64| {
+            a.checked_add(n).is_some_and(|end| {
+                self.own
+                    .borrow()
+                    .range(..=(a, usize::MAX))
+                    .next_back()
+                    .is_some_and(|(&(s, _), &(stop, _))| s <= a && end <= stop)
+            })
+        };
+        if self.memory.resolve(addr, len).is_some() {
+            return (len, "one pool run");
+        }
+        if own(addr, len) {
+            return (len, "the host's own memory");
+        }
+        let mapped: u64 = self.memory.pool_ranges(addr, len).iter().map(|r| r.2).sum();
+        if mapped >= len {
+            return (len, "title pages, wrapped");
+        }
+        match (root, mapped) {
+            (true, _) if self.memory.resolve(addr, 1).is_some() || own(addr, 1) => (mapped, "a root view whose range has a gap"),
+            (true, _) => (mapped, "a root view unmapped at its address: the null view"),
+            (false, 0) => (0, "unmapped: the null view"),
+            (false, _) => (mapped, "a gap: the null view"),
+        }
+    }
+
     /// `VICTORY_TRACE_CONTENT=<dir>`: for the first draws into a depth target, every texture and
     /// constant buffer their descriptor tables hold: its view, the fraction of its title memory
     /// that is non-zero, and (8-bit colour textures) the title memory detiled and the host
@@ -2851,6 +3268,15 @@ impl<B: GraphicsBackend> NativeHost<B> {
                     self.trace_draw(root, binding.as_deref(), false);
                 }
                 self.remirror_tables(root, binding.as_deref());
+                #[cfg(target_os = "macos")]
+                if super::gpu_vertex_trace::on() {
+                    let indexed = match (call, index) {
+                        (DrawCall::Indexed { .. }, Some((a, size, _))) => Some((*a, *size)),
+                        _ => None,
+                    };
+                    let mesh = matches!(call, DrawCall::Mesh { .. });
+                    super::gpu_vertex_trace::draw(self, root, binding.as_deref(), vertex, indexed, mesh);
+                }
                 self.materialize_typed_buffers(root, binding.as_deref(), heaps.0.as_ref());
                 self.trace_root_span(root, binding.as_deref(), &[0; 3]);
                 self.trace_content(root, vertex, call, binding.as_deref(), targets);

@@ -39,6 +39,8 @@ pub mod freed;
 #[cfg(target_os = "macos")]
 pub(crate) mod geometry_trace;
 pub(crate) mod glue;
+#[cfg(target_os = "macos")]
+pub(crate) mod gpu_vertex_trace;
 /// `VICTORY_TRACE_FRAME`: the host's side of a frame (call times, lock waits, texture work).
 #[cfg(target_os = "macos")]
 pub(crate) mod hosttime;
@@ -63,6 +65,20 @@ pub use glue::{
     last_frame, last_frame_size, memory_parts, pool_observer, pools, render_target_shapes, set_event_hook,
     set_caller_hook, set_layer, shader_stats, texture_budget_bytes,
 };
+
+/// Frames presented so far, read without the host's lock: a stall report must not wait behind the
+/// call that is stalling.
+#[cfg(target_os = "macos")]
+pub fn presented_frames() -> u64 {
+    crate::queue::presented()
+}
+
+/// What the last host call entered, how long ago, on which host thread number: a stall report
+/// joins this with the loader's thread dump (which names the title's own threads).
+#[cfg(target_os = "macos")]
+pub fn host_phase() -> Option<(&'static str, f64, u64)> {
+    hosttime::phase_now()
+}
 
 /// Reads `out.len()` bytes at `at` from this process, false if they cannot be read (unmapped
 /// memory: the kernel checks, nothing faults).

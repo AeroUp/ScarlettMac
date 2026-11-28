@@ -93,3 +93,30 @@ fn packed_unsigned_16_bit_conversions_translate() {
         ],
     );
 }
+
+/// Compute programs whose lowering left a lane mask join's number as a phi with no incoming
+/// values (`Lower::mask_phi_number` cached it before an edge failed, and a later read found it):
+/// they translated into DXIL that the Metal Shader Converter crashes on in SimplifyCFG
+/// (the first four), taking the process with it. Refused now (`Lower::unfilled_phis`).
+#[test]
+fn a_join_whose_incoming_values_were_not_all_made_is_refused() {
+    for hash in [
+        "4791a0a64d9e325d",
+        "9a95132bed6c6513",
+        "b916af43ceba0a29",
+        "dec5136b141ac4b2",
+        "4e2be81db49aece1",
+        "c22779675a2f025d",
+    ] {
+        let Some(shader) = translate(hash) else {
+            return;
+        };
+        match shader {
+            Ok(()) => panic!("{hash}: translated with a phi lacking an edge's value"),
+            Err(e) => assert!(
+                e.contains("a join whose incoming values were not all made"),
+                "{hash}: {e}"
+            ),
+        }
+    }
+}

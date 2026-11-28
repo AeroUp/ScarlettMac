@@ -263,6 +263,7 @@ impl<S> Held<S> {
         let mut forced = Vec::new();
         for (q, items) in &mut self.queues {
             if let Some((Item::Segment(_, waits), since, _)) = items.front_mut()
+                && !waits.is_empty()
                 && since.elapsed() >= limit
             {
                 forced.push((*q, std::mem::take(waits)));

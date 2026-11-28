@@ -11,14 +11,14 @@ use victory_backend::resources::{Format, ResourceBackend, TextureDesc, Topology}
 use victory_metal::mem::{Alias, page_size};
 use victory_shader::{emit::graphics, native::HwStage};
 
-fn translate(stage: HwStage, words: &[u32], rect: bool) -> victory_shader::emit::HostShader {
+pub(super) fn translate(stage: HwStage, words: &[u32], rect: bool) -> victory_shader::emit::HostShader {
     let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let container = graphics::container(stage, &bytes, &[0; 0x10]).unwrap();
     shaders::translate_extra(&container, rect, 0, [0; 32]).unwrap()
 }
 
 // Assembled with llvm-mc -triple=amdgcn -mcpu=gfx1030 -show-encoding.
-fn vertex(format: u32, count: u32, rect: bool) -> victory_shader::emit::HostShader {
+pub(super) fn vertex(format: u32, count: u32, rect: bool) -> victory_shader::emit::HostShader {
     translate(
         HwStage::Vs,
         &[
@@ -369,14 +369,32 @@ fn a_stage_in_vertex_buffer_across_title_pages_draws_its_triangle() {
 /// for the indices past the page, stitching arbitrary vertices together.
 #[test]
 fn an_index_buffer_across_title_pages_draws_its_triangle() {
+    index_buffer_across_title_pages(false);
+}
+
+/// The same with 32-bit indices (`DXGI_FORMAT_R32_UINT`): the first index ends the first title
+/// page and the other two start the next. Read as 16-bit indices they would be 0, 0, 1, a
+/// triangle with no area, so this checks the width reaches the host's index fetch.
+#[test]
+fn a_32_bit_index_buffer_across_title_pages_draws_its_triangle() {
+    index_buffer_across_title_pages(true);
+}
+
+fn index_buffer_across_title_pages(wide: bool) {
     let Some(h) = host() else { return };
     let page = page_size().max(16384);
     let (_pool, title) = two_pages_out_of_order(&h, page);
     title.write(0, &[-1.0f32, -1.0, 0.0, 1.0]);
     title.write(20, &[-1.0f32, 3.0, 0.0, 1.0]);
     title.write(40, &[3.0f32, -1.0, 0.0, 1.0]);
-    // Indices 0, 1, 2 at the second half of the first title page and the first half of the next.
-    title.write(page - 2, &[0u16, 1, 2]);
+    // Indices 0, 1, 2 straddling the end of the first title page and the start of the next.
+    let at = if wide {
+        title.write(page - 4, &[0u32, 1, 2]);
+        page - 4
+    } else {
+        title.write(page - 2, &[0u16, 1, 2]);
+        page - 2
+    };
     let memory = h.memory();
     let mut t = Title::new(h.backend, memory);
     let vs = position_only();
@@ -401,7 +419,8 @@ fn an_index_buffer_across_title_pages_draws_its_triangle() {
     list.set_graphics_pipeline(&pso, Topology::Triangles);
     list.set_graphics_binding(binding);
     list.set_vertex_buffer_view(0, title.va, 60);
-    list.set_index_buffer_view(title.va + (page - 2) as u64, 6, false);
+    let width = if wide { 4 } else { 2 };
+    list.set_index_buffer_view(title.va + at as u64, 3 * width, wide);
     list.draw_indexed_instanced(3, 1, 0, 0, 0).unwrap();
     super::run(&t.host, &[&list]);
     assert_covered(&t, &color);

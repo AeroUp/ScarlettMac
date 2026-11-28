@@ -193,11 +193,17 @@ pub(crate) fn lower_graphics(parts: &Parts, guessed: bool) -> Result<Lowered, Sh
     // A dword of an image's descriptor that the program reads but the lazy pass could not make
     // (a loop-carried value, a use that is no number) is made at its load on one more pass.
     let mut eager_image_dwords = false;
+    // Barycentric input VGPRs a program reads as data are loaded from `SV_Barycentrics` only on
+    // a pass after one they refused. The passes before keep them unknown, so a program that
+    // never needs them (a value that keeps one only in lanes or a half nothing reads) translates
+    // as it did before they could be loaded, with no SV_Barycentrics input.
+    let mut eager_barycentrics = false;
     loop {
         #[cfg(test)]
         PASSES.set(PASSES.get() + 1);
         let mut lower = Lower::new(parts, &bad, console, guessed);
         lower.eager_image_dwords |= eager_image_dwords;
+        lower.eager_barycentrics = eager_barycentrics;
         match lower.run() {
             Ok(l) => return Ok(l),
             Err(Stop::Retry(phis)) => {
@@ -222,6 +228,15 @@ pub(crate) fn lower_graphics(parts: &Parts, guessed: bool) -> Result<Lowered, Sh
                 bad.retain(|_, w| *w != DESCRIPTOR_IMAGE_REST);
                 eager_image_dwords = true;
             }
+            // Refused for a barycentric read as data, or after a join with one gave up: once more
+            // with them loaded.
+            Err(Stop::Fail(ShaderError::Unsupported { what, .. }))
+                if !eager_barycentrics
+                    && (what == RAW_BARYCENTRIC || bad.values().any(|&w| w == RAW_BARYCENTRIC)) =>
+            {
+                bad.retain(|_, w| *w != RAW_BARYCENTRIC);
+                eager_barycentrics = true;
+            }
             Err(Stop::Fail(e)) => return Err(e),
         }
     }
@@ -230,6 +245,23 @@ pub(crate) fn lower_graphics(parts: &Parts, guessed: bool) -> Result<Lowered, Sh
 const TWO_PI: f32 = std::f32::consts::TAU;
 /// `s_sendmsg` id of a mesh or NGG stage's output allocation request.
 const GS_ALLOC_REQ: u16 = 9;
+/// DXIL semantic kind of `SV_Barycentrics`.
+pub(crate) const BARYCENTRICS: u8 = 28;
+/// A barycentric input VGPR's value until something reads it as data (`Lower::barycentric`).
+const RAW_BARYCENTRIC: Why = "barycentrics read directly";
+
+/// The DXIL interpolation mode of a barycentric kind; the pull model has none.
+fn interp_mode(b: Barycentric) -> Option<u8> {
+    Some(match b {
+        Barycentric::PerspectiveCenter => 2,
+        Barycentric::PerspectiveCentroid => 3,
+        Barycentric::PerspectiveSample => 6,
+        Barycentric::LinearCenter => 4,
+        Barycentric::LinearCentroid => 5,
+        Barycentric::LinearSample => 7,
+        Barycentric::PerspectivePullModel => return None,
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Numeric {
@@ -475,6 +507,11 @@ struct Lower<'a> {
     rect_corner: Option<(usize, V, V)>,
     /// Stage-in input channels already loaded in the entry block.
     loaded_inputs: Map<(usize, u8), Val>,
+    /// Barycentric input VGPRs (pixel), loaded from `SV_Barycentrics` when read as data on an
+    /// eager pass (`lower_graphics`): most programs read them only through `v_interp_*`, which
+    /// loads the attribute itself.
+    raw_barycentrics: Map<Value, (Barycentric, u8)>,
+    eager_barycentrics: bool,
     /// Active corner evaluation pass for `SV_VertexID`-driven rectangle lists (`lower/rect.rs`).
     rect_pass: Option<rect::RectPass>,
 }
@@ -1289,6 +1326,8 @@ impl<'a> Lower<'a> {
             debug_pos: None,
             rect_corner: None,
             loaded_inputs: Map::default(),
+            raw_barycentrics: Map::default(),
+            eager_barycentrics: false,
             rect_pass: None,
         }
     }
@@ -2014,6 +2053,7 @@ impl<'a> Lower<'a> {
             self.lower_blocks(&order, self.s.entry)?;
             self.fill_phis()?;
         }
+        self.unfilled_phis()?;
         let user_data = self.user_reads.values().copied().collect();
         self.s.samplers = self.samplers.len() as u32;
         let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
@@ -2332,6 +2372,11 @@ impl<'a> Lower<'a> {
                     Some(&Input::InstanceId) if self.rect_pass.is_some() => {
                         Val::I32(self.s.m.i32(0))
                     }
+                    // Loaded on first use as data (`get`).
+                    Some(&Input::Barycentric { kind, index }) => {
+                        self.raw_barycentrics.insert(v, (kind, index));
+                        Val::Missing(RAW_BARYCENTRIC)
+                    }
                     Some(&input) => self.input(input),
                     // Registers no one set read as zero (the validator
                     // refuses reads of undef).
@@ -2354,7 +2399,7 @@ impl<'a> Lower<'a> {
                     None => Val::Missing("a vertex input the signature lacks"),
                 };
             }
-            Input::Barycentric { .. } => return Val::Missing("barycentrics read directly"),
+            Input::Barycentric { kind, index } => return self.barycentric(kind, index),
             Input::PrimitiveId => return Val::Missing("the primitive id"),
             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
             // host's value can be.
@@ -2484,6 +2529,77 @@ impl<'a> Lower<'a> {
             }
         };
         self.load_input(id, col)
+    }
+
+    /// Barycentric input VGPR `index` (0 i, 1 j) of `kind`, read as data rather than through
+    /// `v_interp_*`: a channel of an `SV_Barycentrics` element interpolated as `kind` says, one
+    /// element per mode. `v_interp_p1/p2` make P0 + i·(P1 - P0) + j·(P2 - P0), so i and j are
+    /// the weights of the primitive's vertices 1 and 2, which are `SV_Barycentrics.y` and `.z`
+    /// (x is vertex 0's; `victory-gpu`'s `raw_barycentrics_are_the_weights_of_vertices_1_and_2`
+    /// draws it through Metal). Guess (docs/native-host.md, "Barycentrics read as data"): the
+    /// console's P0 is the primitive's first vertex in D3D order, as [`Self::interp`] takes it
+    /// for the provoking vertex; strips' odd triangles are unchecked. Centre modes only: the
+    /// Metal Shader Converter refuses the others ("Interpolation mode for pixel barycentrics is
+    /// not supported"), and DXIL allows one perspective and one linear SV_Barycentrics, which
+    /// the two centre modes are.
+    fn barycentric(&mut self, kind: Barycentric, index: u8) -> Val {
+        let mode = match interp_mode(kind) {
+            Some(mode @ (2 | 4)) => mode,
+            Some(_) => return Val::Missing("centroid or sample barycentrics read directly"),
+            None => return Val::Missing("pull-model barycentrics read directly"),
+        };
+        let found = self
+            .s
+            .inputs
+            .iter()
+            .position(|e| e.kind == BARYCENTRICS && e.interp == mode);
+        let id = match found {
+            Some(id) => id,
+            None => {
+                // Measured (Metal Shader Converter 4.0.3, macOS 27.2 on an M4 Max): without an
+                // SV_Position input, the converter's perspective barycentrics are not divided by
+                // their sum (each is the vertex's screen-space weight over its w); with one,
+                // they are perspective-correct. So the program declares it, read or not.
+                if mode == 2 && !self.s.inputs.iter().any(|e| e.kind == 3) {
+                    let row = self
+                        .s
+                        .inputs
+                        .iter()
+                        .filter_map(|e| e.row)
+                        .map(|r| r + 1)
+                        .max()
+                        .unwrap_or(0);
+                    self.s.inputs.push(SigElement {
+                        name: "SV_Position".into(),
+                        index: 0,
+                        kind: 3,
+                        comp: 9,
+                        interp: 4,
+                        row: Some(row),
+                        col: 0,
+                        cols: 4,
+                        usage: 0,
+                        half: false,
+                    });
+                }
+                let index = self.s.inputs.iter().filter(|e| e.kind == BARYCENTRICS).count();
+                self.s.inputs.push(SigElement {
+                    name: "SV_Barycentrics".into(),
+                    index: index as u32,
+                    kind: BARYCENTRICS,
+                    comp: 9,
+                    interp: mode,
+                    // Not packed: no register (as DXC declares it).
+                    row: None,
+                    col: 0,
+                    cols: 3,
+                    usage: 0,
+                    half: false,
+                });
+                self.s.inputs.len() - 1
+            }
+        };
+        self.load_any_input(id, index + 1)
     }
 
     /// A component of a compute thread or group id, read in the entry block.
@@ -2629,6 +2745,20 @@ impl<'a> Lower<'a> {
         Ok(self.s.m.i32(c))
     }
 
+    /// Refuses a function with a join whose incoming values are not one per edge into its
+    /// block. [`Lower::mask_phi_number`] caches a join's phi in `ballots` before filling it (for
+    /// a back edge that reads it); when an edge has no number it fails, the empty phi stays
+    /// cached, and a later read of the same mask can use it. The Metal Shader Converter crashes
+    /// on such a function (in SimplifyCFG, taking the process with it) rather than reporting it.
+    /// Dropping the failed phi from the cache instead changes the output of 61 programs of the
+    /// kept store that translate today, not proven equivalent, so it is left for its own change.
+    fn unfilled_phis(&self) -> Result<(), Stop> {
+        if self.s.m.phi_without_its_edges() {
+            return Err(unsupported(0, "a join whose incoming values were not all made"));
+        }
+        Ok(())
+    }
+
     /// The DXIL form of an IR value.
     fn get(&mut self, v: Value) -> Result<Val, Why> {
         if self.phi_at.contains_key(&v) {
@@ -2639,6 +2769,16 @@ impl<'a> Lower<'a> {
         // are; only one without needs to know whether it is a lane mask.
         if let Some(val @ (Val::I32(_) | Val::Bit(_))) = found {
             return Ok(val);
+        }
+        let raw = self.raw_barycentrics.get(&v).copied().filter(|_| self.eager_barycentrics);
+        if let (Some(Val::Missing(_)), Some((kind, index))) = (found, raw) {
+            return match self.barycentric(kind, index) {
+                Val::Missing(why) => Err(why),
+                val => {
+                    self.vals.insert(v, val);
+                    Ok(val)
+                }
+            };
         }
         if self.mask_ok && (self.x.st.masks.contains_key(&v) || self.x.st.highs.contains_key(&v)) {
             return self.mask_dword(v).map(Val::I32);
@@ -12007,15 +12147,7 @@ impl<'a> Lower<'a> {
                 ..
             } => (
                 attribute,
-                match barycentric {
-                    Barycentric::PerspectiveCenter => 2,
-                    Barycentric::PerspectiveCentroid => 3,
-                    Barycentric::PerspectiveSample => 6,
-                    Barycentric::LinearCenter => 4,
-                    Barycentric::LinearCentroid => 5,
-                    Barycentric::LinearSample => 7,
-                    Barycentric::PerspectivePullModel => return Err("pull-model interpolation"),
-                },
+                interp_mode(*barycentric).ok_or("pull-model interpolation")?,
             ),
             // P0, the provoking vertex: a flat (nointerpolation) input.
             Interp::Vertex {
@@ -15265,9 +15397,14 @@ impl<'a> Lower<'a> {
                         regs.insert(r);
                         tainted.insert(w);
                     }
-                } else if guard.is_none() {
-                    for w in &inst.writes {
-                        regs.remove(&w.0);
+                } else {
+                    // Only VGPR writes keep their old value under a lane guard;
+                    // SGPR and SCC writes (e.g. `v_readfirstlane_b32`, `v_cmp_*`)
+                    // always overwrite the register unconditionally.
+                    for &(r, _) in &inst.writes {
+                        if guard.is_none() || !matches!(r, Reg::V(_)) {
+                            regs.remove(&r);
+                        }
                     }
                 }
             }
@@ -15539,6 +15676,90 @@ impl<'a> Lower<'a> {
             .insts
             .iter()
             .find(|i| i.writes.iter().any(|w| w.1 == v))
+    }
+
+    /// The lane mask dword `v` holds, and whether it is a wave64 mask pair's high dword: a mask
+    /// value, a copy of one, or a `v_readlane_b32` of a constant lane that `v_writelane_b32`
+    /// filled with a mask's dword on every path (`spilled_word`). The console's compiler swaps
+    /// registers around a region by spilling VCC to VGPR lanes and reading it back; the joins
+    /// after it hold that mask on each edge, though the copies that bring it differ.
+    fn mask_word(&self, v: Value, seen: &mut Vec<Value>) -> Option<(Bool, bool)> {
+        let st = self.x.st;
+        if let Some(&m) = st.masks.get(&v) {
+            return Some((m, false));
+        }
+        if let Some(&lo) = st.highs.get(&v)
+            && let Some(&m) = st.masks.get(&lo)
+        {
+            return Some((m, true));
+        }
+        if seen.contains(&v) {
+            return None;
+        }
+        seen.push(v);
+        if let Some(&s) = st.restored.get(&v) {
+            return self.mask_word(s, seen);
+        }
+        if let Some(&(b, i)) = self.phi_at.get(&v) {
+            let mut found = None;
+            for &a in &self.x.p.blocks[b].phis[i].args {
+                let w = self.mask_word(a, seen)?;
+                if found.is_some_and(|f| f != w) {
+                    return None;
+                }
+                found = Some(w);
+            }
+            return found;
+        }
+        let inst = self.def_inst(v)?;
+        if let Some(c) = crate::structure::copied(inst, v, |x| self.def_inst(x)) {
+            return self.mask_word(c, seen);
+        }
+        let Fields::Valu(w) = &inst.fields else { return None };
+        if inst.name() == "v_readlane_b32"
+            && let [Operand::Vector { reg, .. }, at] = w.src[..]
+            && let Some(lane) = crate::resource::lane_of(at)
+            && let Some(x) = inst.read(Reg::V(reg))
+        {
+            return self.spilled_word(x, lane, seen);
+        }
+        None
+    }
+
+    /// What `v_writelane_b32` puts in lane `lane` of `v` on every path, as a mask dword: the
+    /// mask its source register holds, and whether that register is a pair's high dword.
+    fn spilled_word(&self, v: Value, lane: u32, seen: &mut Vec<Value>) -> Option<(Bool, bool)> {
+        if seen.contains(&v) {
+            return None;
+        }
+        seen.push(v);
+        if let Some(&(b, i)) = self.phi_at.get(&v) {
+            let mut found = None;
+            for &a in &self.x.p.blocks[b].phis[i].args {
+                let w = self.spilled_word(a, lane, seen)?;
+                if found.is_some_and(|f| f != w) {
+                    return None;
+                }
+                found = Some(w);
+            }
+            return found;
+        }
+        let inst = self.def_inst(v)?;
+        let Fields::Valu(w) = &inst.fields else { return None };
+        let (Some(Operand::Vector { reg, .. }), [value, at]) = (w.dst, &w.src[..]) else {
+            return None;
+        };
+        if inst.name() != "v_writelane_b32" || w.sdwa.is_some() || w.dpp.is_some() {
+            return None;
+        }
+        if crate::resource::lane_of(*at)? != lane {
+            return self.spilled_word(inst.read(Reg::V(reg))?, lane, seen);
+        }
+        let Operand::Scalar { code, .. } = *value else { return None };
+        if code == NULL {
+            return None;
+        }
+        self.mask_word(inst.read(Reg::S(code))?, seen)
     }
 
     /// The constant `v` holds, `env` giving phi values: moves of constants.
@@ -15896,6 +16117,14 @@ impl<'a> Lower<'a> {
                 let qb = self.edges.get(&(q, b)).copied().unwrap_or(qb);
                 let arg = phi.args[n];
                 let read = live.contains(&(phi.value, n));
+                // A root parameter's dword joined: made now, as any read of it is (`get`),
+                // rather than left out of the join as a value nothing has.
+                if !self.vals.contains_key(&arg)
+                    && let Some(&(param, dword)) = self.params.get(&arg)
+                {
+                    let val = self.user(param, dword);
+                    self.vals.insert(arg, val);
+                }
                 let x = match (self.vals.get(&arg).copied(), bit) {
                     (Some(Val::I32(x)), false) | (Some(Val::Bit(x)), true) => x,
                     // No lane from this edge reads it, or no lane comes
@@ -15909,10 +16138,25 @@ impl<'a> Lower<'a> {
                     }
                     // An input an unguarded counted `v_movreld` loop overwrites
                     // before anything reads it (PR #457).
-                    (Some(Val::Missing("barycentrics read directly")), false)
+                    (Some(Val::Missing(RAW_BARYCENTRIC)), false)
                         if read && self.overwritten_movreld_edge(b, phi, n).is_some() =>
                     {
                         self.s.m.undef(self.s.t.i32)
+                    }
+                    // A barycentric input read as data after the join.
+                    (Some(Val::Missing(RAW_BARYCENTRIC)), false)
+                        if read
+                            && self.eager_barycentrics
+                            && self.raw_barycentrics.contains_key(&arg) =>
+                    {
+                        match self.get(arg) {
+                            Ok(Val::I32(x)) => x,
+                            Ok(_) => unreachable!("a barycentric is a dword"),
+                            Err(why) => {
+                                retry.push((phi.value, why));
+                                continue 'phi;
+                            }
+                        }
                     }
                     (Some(Val::Bit(_)), false) if read => {
                         retry.push((phi.value, "an SCC joined with SGPR values"));
@@ -16101,6 +16345,21 @@ impl<'a> Lower<'a> {
                         return Err(unsupported(offset, HOST_LANES));
                     }
                     (None, Some(Val::I32(_))) => return Err(unsupported(offset, DIVERGENT)),
+                    // A lane mask the console saved to a VGPR lane and read back after a region
+                    // (`v_writelane_b32` of VCC, `v_readlane_b32` back): the same mask on every
+                    // path, so this edge brings it, though the copies that bring it differ.
+                    (None, Some(Val::Missing(_)))
+                        if let Some((m, false)) = self.mask_word(arg, &mut Vec::new())
+                            && match high.map(|h| h.args[n]) {
+                                None => true,
+                                Some(h) => matches!(
+                                    self.mask_word(h, &mut Vec::new()),
+                                    Some((hm, true)) if hm == m
+                                ),
+                            } =>
+                    {
+                        self.boolean(m, qb).map_err(|w| unsupported(offset, w))?
+                    }
                     (None, Some(Val::Missing(_))) => return Err(unsupported(offset, MISSING)),
                     (None, Some(Val::Bit(_))) => return Err(unsupported(offset, BIT)),
                     (None, None) => return Err(unsupported(offset, NONE)),
@@ -16608,6 +16867,41 @@ mod tests {
             chains.map(|moves| interp_copy_chain(moves, false)),
             chains.map(|moves| (true, moves + 2))
         );
+    }
+
+    /// A scalar a vector instruction writes under a lane guard overwrites it unconditionally
+    /// (`v_readfirstlane_b32`, `v_cmp_*`): the old value is dead after it, though a guarded VGPR
+    /// write keeps its own.
+    #[test]
+    fn a_guarded_scalar_write_kills_a_stale_sgpr() {
+        // s6 holds a missing value (a timestamp) where s0 == 0 and 5 where s0 != 0; the flag in
+        // v1 skips the first read on the s0 == 0 path. After that, inside a guarded region (EXEC
+        // narrowed without a branch), `v_readfirstlane_b32` overwrites s6 before s6 is read
+        // again.
+        let mut words = [
+            0xF490_0180,
+            0, // s_memtime s[6:7]
+            0x7E02_0280, // v_mov_b32 v1, 0
+            0xBF06_8000, // s_cmp_eq_u32 s0, 0 (s0 = group id X)
+            0xBF85_0002, // s_cbranch_scc1 -> join
+            0xBE86_0385, // s_mov_b32 s6, 5
+            0x7E02_02C1, // v_mov_b32 v1, -1
+            0x7D84_02C1, // join: v_cmp_eq_u32 vcc_lo, -1, v1
+            0xBF86_0003, // s_cbranch_vccz -> after
+            0xBF07_8006, // s_cmp_lg_u32 s6, 0
+            0xBF85_0001, // s_cbranch_scc1 -> after
+            0xBE84_0380, // s_mov_b32 s4, 0
+            0x7DA4_0080, // after: v_cmpx_eq_u32 exec_lo, 0, v0 (narrows EXEC)
+            0x7E0C_0500, // v_readfirstlane_b32 s6, v0 (guarded, writes SGPR)
+            0x7DA4_0006, // v_cmpx_eq_u32 exec_lo, s6, v0 (reads the new s6)
+            0xBEFE_03C1, // s_mov_b32 exec_lo, -1
+            S_ENDPGM,
+        ];
+        let group_ids_xy = 3 << 7;
+        lowers(&words, group_ids_xy).expect("a guarded v_readfirstlane overwrites the stale s6");
+        // Without the overwrite, the guarded compare reads the stale s6.
+        words[13] = 0xBF80_0000; // s_nop 0
+        assert!(lowers(&words, group_ids_xy).is_err());
     }
 
     #[test]

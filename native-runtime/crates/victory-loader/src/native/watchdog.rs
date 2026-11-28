@@ -37,8 +37,14 @@ const FAIL_FAST_MARKERS: [u32; 2] = [0x4d8b_d421, 0];
 
 /// `image+0x6844a20`: the per-thread scope table, for this build.
 const TABLE_RVA: usize = 0x0684_4a20;
+/// `image+0x971fb8`: the title watchdog's global heartbeat, for this build: the fallback clock
+/// is 30 s without a change to it.
+const HEARTBEAT_RVA: usize = 0x0971_fb8;
 /// Entries in the table.
 const GROUPS: usize = 64;
+/// The age at which the watchdog fails a scope a title thread entered and did not leave, in
+/// seconds: its other clock, alongside 30 s without the global heartbeat.
+pub const SCOPE_DEADLINE_S: f64 = 300.0;
 /// Bytes per entry: a dword, a count, and eight entry times.
 const STRIDE: usize = 0x48;
 /// Entry times an entry holds.
@@ -80,6 +86,46 @@ fn scopes_in(bytes: &[u8]) -> Option<Vec<Scope>> {
         }
         let mut entered = Vec::with_capacity(count as usize);
         for i in 0..count as usize {
+            let at = 8 + i * 8;
+            let time = u64::from_le_bytes(entry[at..at + 8].try_into().ok()?);
+            if time != 0 {
+                entered.push(time);
+            }
+        }
+        if !entered.is_empty() {
+            scopes.push(Scope { group, entered });
+        }
+    }
+    Some(scopes)
+}
+
+/// [`scopes_in`] for the stall monitor: an entry whose count is past the eight times it holds is
+/// read as its first eight, and only a count no nesting explains (past [`GROUPS`]) refuses the
+/// table.
+///
+/// A scope a thread nests more than eight deep -- the world load's call stack does -- made the
+/// crash-time reader refuse the whole table, which is right for a fault (another build's layout
+/// must not pass for an active scope) but blind for a monitor: the run of 28 November
+/// (`20261128-133911-YLju97`) reported no scope at all for its last ten minutes, and then died on
+/// the watchdog's 300 s scope branch (a breakpoint at `image+0x5149aec` from its own thread,
+/// `23d0f9a`, `23d1211`), so nothing named the thread that never left its scope.
+fn scopes_for_monitor(bytes: &[u8]) -> Option<Vec<Scope>> {
+    if bytes.len() < GROUPS * STRIDE {
+        return None;
+    }
+    let mut scopes = Vec::new();
+    for group in 0..GROUPS {
+        let entry = &bytes[group * STRIDE..(group + 1) * STRIDE];
+        let count = u32::from_le_bytes(entry[4..8].try_into().ok()?);
+        if count == 0 {
+            continue;
+        }
+        // Nesting is counted, not a layout: keep what fits.
+        if count as usize > GROUPS {
+            return None;
+        }
+        let mut entered = Vec::with_capacity(TIMES.min(count as usize));
+        for i in 0..TIMES.min(count as usize) {
             let at = 8 + i * 8;
             let time = u64::from_le_bytes(entry[at..at + 8].try_into().ok()?);
             if time != 0 {
@@ -138,6 +184,58 @@ pub fn log(base: usize) {
         newest = format_args!("{newest:#x}"),
         "title watchdog: scopes at the fail-fast marker"
     );
+}
+
+/// One scope active now: its table entry, how deep it was entered, and how long ago its oldest
+/// entry was entered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Active {
+    pub group: usize,
+    pub depth: usize,
+    pub age_s: f64,
+}
+
+/// The scopes active at `now` (the HLE's QPC, `victory_gpu::clock::counter`: the same clock the
+/// table's entry times are on), with each one's age: what a stall monitor reads to see a scope a
+/// title thread entered and did not leave (the watchdog fails one after 300 s). `None` when the
+/// table does not have this build's layout, as in [`log`].
+pub fn active(base: usize, now: u64) -> Option<Vec<Active>> {
+    // SAFETY: the table is in the title image's data, mapped for the image's life; the count
+    // check in `scopes_in` refuses another layout.
+    let bytes = unsafe {
+        std::slice::from_raw_parts((base + TABLE_RVA) as *const u8, GROUPS * STRIDE)
+    };
+    active_in(bytes, now)
+}
+
+/// [`active`] over a table's bytes.
+fn active_in(bytes: &[u8], now: u64) -> Option<Vec<Active>> {
+    let scopes = scopes_for_monitor(bytes)?;
+    Some(
+        scopes
+            .iter()
+            .filter_map(|s| {
+                let oldest = s.entered.iter().copied().min()?;
+                Some(Active {
+                    group: s.group,
+                    depth: s.entered.len(),
+                    age_s: now.saturating_sub(oldest) as f64 / 1e9,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The title watchdog's global heartbeat (`image+0x971fb8`), read without changing it. Its
+/// fallback clock fails the process 30 s after it last changed, so a stall monitor compares it
+/// with what it read a second ago to know that clock is running.
+pub fn heartbeat(base: usize) -> Option<u64> {
+    Some(heartbeat_word(base + HEARTBEAT_RVA))
+}
+
+fn heartbeat_word(at: usize) -> u64 {
+    // SAFETY: `at` is inside the image's data (or, in tests, a local): a plain read.
+    unsafe { (at as *const u64).read_volatile() }
 }
 
 #[cfg(test)]
@@ -200,5 +298,59 @@ mod tests {
         let at = 5 * STRIDE;
         table[at + 4..at + 8].copy_from_slice(&1u32.to_le_bytes());
         assert_eq!(scopes_in(&table), Some(Vec::new()));
+    }
+
+    /// A stall monitor reads each active scope's age against its own QPC: the entry a title
+    /// thread entered 250 s ago is the one the watchdog fails at 300, whatever the newest entry
+    /// in the table is.
+    #[test]
+    fn active_scopes_carry_their_age() {
+        let mut table = vec![0u8; GROUPS * STRIDE];
+        let at = |group: usize, offset: usize| group * STRIDE + offset;
+        table[at(2, 4)..at(2, 8)].copy_from_slice(&2u32.to_le_bytes());
+        table[at(2, 8)..at(2, 16)].copy_from_slice(&50_000_000_000u64.to_le_bytes());
+        table[at(2, 16)..at(2, 24)].copy_from_slice(&200_000_000_000u64.to_le_bytes());
+        table[at(9, 4)..at(9, 8)].copy_from_slice(&1u32.to_le_bytes());
+        table[at(9, 8)..at(9, 16)].copy_from_slice(&250_000_000_000u64.to_le_bytes());
+        let now = 300_000_000_000;
+        assert_eq!(
+            active_in(&table, now),
+            Some(vec![
+                Active { group: 2, depth: 2, age_s: 250.0 },
+                Active { group: 9, depth: 1, age_s: 50.0 },
+            ])
+        );
+        // A clock behind an entry (impossible but readable) does not make a negative age.
+        let behind = active_in(&table, 1).unwrap();
+        assert!(behind.iter().all(|a| a.age_s == 0.0));
+        assert_eq!(active_in(&table[..STRIDE], now), None);
+    }
+
+    /// A scope nested deeper than the eight times an entry holds is read as its first eight by
+    /// the monitor, so a deep call stack does not blind it; the crash-time reader still refuses
+    /// the table then.
+    #[test]
+    fn a_deep_scope_is_read_by_the_monitor_and_refused_by_the_crash_reader() {
+        let mut table = vec![0u8; GROUPS * STRIDE];
+        let at = 4 * STRIDE;
+        table[at + 4..at + 8].copy_from_slice(&12u32.to_le_bytes());
+        for i in 0..12 {
+            let t = 1_000_000 + i as u64;
+            table[at + 8 + i * 8..at + 16 + i * 8].copy_from_slice(&t.to_le_bytes());
+        }
+        assert_eq!(scopes_in(&table), None, "the crash reader refuses a count past eight");
+        let scopes = scopes_for_monitor(&table).expect("the monitor reads it");
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].entered.len(), 8);
+        // A count no nesting explains is another layout, even to the monitor.
+        table[at + 4..at + 8].copy_from_slice(&4096u32.to_le_bytes());
+        assert_eq!(scopes_for_monitor(&table), None);
+    }
+
+    /// The heartbeat is a word of the image's data, read in place.
+    #[test]
+    fn the_heartbeat_is_read_where_it_lives() {
+        let word = 0x0123_4567_89ab_cdefu64;
+        assert_eq!(heartbeat_word(&word as *const u64 as usize), word);
     }
 }

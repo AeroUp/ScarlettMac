@@ -392,10 +392,35 @@ pub fn run(
             }
         });
     }
+    // VICTORY_FRAME_DUMP_EVERY=<seconds>,<dir> saves the last frame presented as <dir>/tNNN.ppm
+    // every <seconds>: screenshots that need no screen-recording permission for the window.
+    if let Some((secs, dir)) = std::env::var("VICTORY_FRAME_DUMP_EVERY")
+        .ok()
+        .and_then(|v| frame_dump_every(&v))
+    {
+        std::thread::spawn(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            let mut at = 0u64;
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                at += secs;
+                if let Some((w, h, bgra)) = victory_gpu::native::last_frame() {
+                    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+                    out.extend(bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]));
+                    let _ = std::fs::write(dir.join(format!("t{at:04}.ppm")), out);
+                }
+            }
+        });
+    }
     // What the process is made of, every 10 s: the title's own committed memory beside what the
     // host adds. The 14.9 GB footprint of the run of 27 November 22:23 (1.16 GB resident, 7.8 s a
     // frame, paged out on an 18 GB Mac) could not be attributed from the log; this line does it.
     spawn_memory_report();
+    // `VICTORY_STALL_SECONDS=<n>`: when no frame has been presented for n seconds, say what the
+    // host's last call is doing and dump every title thread's call, and keep saying so every n
+    // seconds of the same stall. A title whose frame or heartbeat passes 30 s ends the run with
+    // the watchdog's fail-fast; this is the record of what held it (off unless set).
+    spawn_stall_report(image.base());
     let launch = Launch(image, dlls);
     let go = move || {
         let launch = launch;
@@ -431,6 +456,112 @@ unsafe impl Send for Launch {}
 /// memory (its console's CPU and GRAPHICS kinds, and the budget it is capped at), the host's
 /// texture copies and their budget, Metal's own allocated bytes, the DXIL the translations hold,
 /// and what is left of the footprint -- which is what tells paging apart from a leak.
+/// `VICTORY_STALL_SECONDS=<n>`: while a title clock the watchdog watches has not moved for n
+/// seconds, say why and which host call each title thread is in. Three clocks are read once a
+/// second, without taking the host's lock:
+///
+/// * the presented frames (a frame, or the render thread's heartbeat, stalled);
+/// * the watchdog's own global heartbeat (`image+0x971fb8`: it fails the process 30 s after this
+///   stops changing);
+/// * the watchdog's scope table (`image+0x6844a20`: it fails the process 300 s after a scope a
+///   title thread entered and did not leave), each entry's age against the same QPC the entries
+///   are stamped with.
+///
+/// The first three reports of a stall include every title thread's host call and call chain (the
+/// loader's thread dump); after that only the line, so a long stall does not fill the log. Off
+/// unless set.
+fn spawn_stall_report(base: usize) {
+    let Some(seconds) = std::env::var("VICTORY_STALL_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+    else {
+        return;
+    };
+    let every = std::time::Duration::from_secs(seconds);
+    let _ = std::thread::Builder::new().name("stall-report".into()).spawn(move || {
+        let tick = std::time::Duration::from_secs(1);
+        let mut frames = victory_gpu::native::presented_frames();
+        let mut frames_since = std::time::Instant::now();
+        let mut heartbeat = native::watchdog::heartbeat(base);
+        let mut heartbeat_since = std::time::Instant::now();
+        // Whether the word at `image+0x971fb8` has ever changed in this run: a build that keeps
+        // something else there would otherwise report a stall from its first second.
+        let mut heartbeat_moves = false;
+        let mut last_report: Option<std::time::Instant> = None;
+        let mut reports = 0u32;
+        loop {
+            std::thread::sleep(tick);
+            let now = victory_gpu::native::presented_frames();
+            if now != frames {
+                let took = frames_since.elapsed();
+                if reports > 0 {
+                    tracing::warn!(
+                        frame = now,
+                        since_last = format_args!("{:.1} s", took.as_secs_f64()),
+                        reports,
+                        "the stall ended: a frame was presented"
+                    );
+                }
+                frames = now;
+                frames_since = std::time::Instant::now();
+                last_report = None;
+                reports = 0;
+            }
+            let word = native::watchdog::heartbeat(base);
+            if word != heartbeat {
+                if heartbeat.is_some() {
+                    heartbeat_moves = true;
+                }
+                heartbeat = word;
+                heartbeat_since = std::time::Instant::now();
+            }
+            let scopes = native::watchdog::active(base, victory_gpu::clock::counter());
+            let oldest = scopes
+                .as_ref()
+                .and_then(|s| s.iter().map(|a| a.age_s).fold(None, |m: Option<f64>, a| Some(m.map_or(a, |m| m.max(a)))))
+                .unwrap_or(0.0);
+            // A stall is any of the watchdog's clocks not moving, past the report's interval. A
+            // scope only matters at its deadline (300 s): reporting one from its tenth second
+            // filled a run's log with the load's own scope, which is entered and left on purpose.
+            let frame_stall = frames_since.elapsed() >= every;
+            let heartbeat_stall = heartbeat_moves && heartbeat_since.elapsed() >= every;
+            let scope_stall = oldest + seconds as f64 >= native::watchdog::SCOPE_DEADLINE_S;
+            if !(frame_stall || heartbeat_stall || scope_stall) {
+                continue;
+            }
+            // One report an interval while it lasts, so its growth is visible without filling
+            // the log with the same line.
+            if last_report.is_some_and(|t| t.elapsed() < every) {
+                continue;
+            }
+            last_report = Some(std::time::Instant::now());
+            reports += 1;
+            let phase = victory_gpu::native::host_phase();
+            tracing::warn!(
+                frame = frames,
+                no_frame_for = format_args!("{:.1} s", frames_since.elapsed().as_secs_f64()),
+                heartbeat_unchanged_for = format_args!(
+                    "{:.1} s{}",
+                    heartbeat_since.elapsed().as_secs_f64(),
+                    if heartbeat_moves { "" } else { " (never changed in this run)" }
+                ),
+                oldest_scope_s = format_args!("{:.1}", oldest),
+                report = reports,
+                host_phase = phase.map_or("no host call in a phase", |p| p.0),
+                phase_for = format_args!("{:.1} s", phase.map_or(0.0, |p| p.1)),
+                host_thread = phase.map_or(0, |p| p.2),
+                scopes = ?scopes.map(|s| s.iter().map(|a| format!("group {} depth {} age {:.0} s", a.group, a.depth, a.age_s)).collect::<Vec<_>>()),
+                "a title clock the watchdog reads has stopped"
+            );
+            // Every title thread's host call and call chain, while there is room in the log for it.
+            if reports <= 3 {
+                native::dump::report_now();
+            }
+        }
+    });
+}
+
 fn spawn_memory_report() {
     let _ = std::thread::Builder::new().name("memory-report".into()).spawn(|| loop {
         std::thread::sleep(std::time::Duration::from_secs(10));
@@ -502,27 +633,40 @@ fn spawn_memory_report() {
             "the render targets the title created, largest first (bytes of title memory)"
         );
         // Why the decoded copies are needed, and how much is sampled where the title wrote it:
-        // a small pool means most of the title's textures are not copied at all.
+        // a small pool means most of the title's textures are not copied at all. Each copy has
+        // one reason, and the reasons' MiB add up to `decoded_mib` (`DecodedReport::reasons_mib`).
+        let [tiled, bcpack, bc_mipped, format, depth, layout, multisampled, alignment, other] = decoded.reasons_mib();
         tracing::info!(
             zero_copy_mib = decoded.zero_copy >> 20,
             zero_copy_textures = decoded.zero_copy_copies,
-            decoded_mib = copies >> 20,
-            tiled_mib = decoded.tiled >> 20,
-            bcpack_mib = decoded.bcpack >> 20,
-            format_mib = decoded.format >> 20,
-            depth_mib = decoded.depth >> 20,
-            layout_mib = decoded.layout >> 20,
-            multisampled_mib = decoded.multisampled >> 20,
-            alignment_mib = decoded.alignment >> 20,
-            other_mib = decoded.other >> 20,
+            decoded_mib = decoded.decoded >> 20,
+            tiled_mib = tiled,
+            bcpack_mib = bcpack,
+            bc_mipped_mib = bc_mipped,
+            format_mib = format,
+            depth_mib = depth,
+            layout_mib = layout,
+            multisampled_mib = multisampled,
+            alignment_mib = alignment,
+            other_mib = other,
             gpu_written_mib = decoded.written >> 20,
+            sampled_only_mib = decoded.sampled_only >> 20,
             in_place_mib = decoded.in_place >> 20,
             in_place_copies = decoded.in_place_copies,
+            streamed_mib = decoded.streamed >> 20,
+            streamed_detiled_mib = decoded.streamed_detiled >> 20,
+            streamed_bcpack_mib = decoded.streamed_bcpack >> 20,
+            streamed_total_mib = victory_gpu::native::textures::streamed_bytes() >> 20,
+            under_copies_mib = decoded.under_copies >> 20,
+            duplicate_copies_mib = decoded.duplicate_copies >> 20,
             released_mib = released >> 20,
+            streamed_released_mib = victory_gpu::native::textures::streamed_released_bytes() >> 20,
+            streamed_released_undone_mib = victory_gpu::native::textures::streamed_released_undone().1 >> 20,
+            streamed_released_undone = victory_gpu::native::textures::streamed_released_undone().0,
             released_faults = page_faults,
             released_misses = page_misses,
             released_writes = page_writes,
-            "texture copies: what is sampled from title memory, what the decoded copies are needed for (tiled swizzle, BCPack/BCn, format, depth, layout, multisampling, alignment, other), and how much could be decoded into the title's own pages in place"
+            "texture copies: what is sampled from title memory, what the decoded copies are needed for (one reason each: tiled swizzle, BCn one image, BCn mip chain, format, depth, layout, multisampling, alignment, other), and how much could be decoded into the title's own pages in place"
         );
     });
 }
@@ -595,5 +739,33 @@ mod tests {
             absent_title_dlls(&stubbed_from, &|d| !ours(d), &mapped),
             ["bink2scarlett.dll", "msvcp140.dll"]
         );
+    }
+}
+
+/// Parses `VICTORY_FRAME_DUMP_EVERY`: `<seconds>,<dir>`, seconds at least 1.
+fn frame_dump_every(v: &str) -> Option<(u64, std::path::PathBuf)> {
+    let (s, d) = v.split_once(',')?;
+    let s = s.trim().parse::<u64>().ok().filter(|&s| s > 0)?;
+    (!d.is_empty()).then(|| (s, std::path::PathBuf::from(d)))
+}
+
+#[cfg(test)]
+mod frame_dump_every_tests {
+    use super::frame_dump_every;
+
+    #[test]
+    fn a_period_and_a_directory_parse() {
+        assert_eq!(
+            frame_dump_every("30,/tmp/shots"),
+            Some((30, std::path::PathBuf::from("/tmp/shots")))
+        );
+    }
+
+    #[test]
+    fn a_zero_or_missing_period_or_directory_is_off() {
+        assert_eq!(frame_dump_every("0,/tmp/x"), None);
+        assert_eq!(frame_dump_every("x,/tmp/x"), None);
+        assert_eq!(frame_dump_every("30,"), None);
+        assert_eq!(frame_dump_every("30"), None);
     }
 }

@@ -13,7 +13,7 @@
 //! is logged when `VICTORY_TRACE_FRAME` is off, and the adders are one branch on a cached answer.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,8 @@ struct Counters {
     /// Of those, the ones Metal had to compile here (nothing in the cache): the frame's cost.
     pipes_made: AtomicU64,
     // --- textures ---
+    /// Submissions whose texture work was left for the next frame (a frame's work budget).
+    sync_deferred: AtomicU64,
     sync_batches: AtomicU64,
     sync_textures: AtomicU64,
     sync_first: AtomicU64,
@@ -96,6 +98,7 @@ static C: Counters = Counters {
     pipes_asked: AtomicU64::new(0),
     pipes_us: AtomicU64::new(0),
     pipes_made: AtomicU64::new(0),
+    sync_deferred: AtomicU64::new(0),
     sync_batches: AtomicU64::new(0),
     sync_textures: AtomicU64::new(0),
     sync_first: AtomicU64::new(0),
@@ -121,6 +124,86 @@ thread_local! {
     /// How long this thread's last `TITLE` lock call waited: a caller that times a whole
     /// `with_title` phase splits it into waiting for the lock and working under it.
     static LAST_WAIT_US: Cell<u64> = const { Cell::new(0) };
+    /// A number for this host thread, for a stall report that names which thread is in which
+    /// phase (the loader's own dump names the title's threads by their Windows ids).
+    static TID: u64 = NEXT_TID.fetch_add(1, Ordering::Relaxed);
+}
+
+static NEXT_TID: AtomicU64 = AtomicU64::new(1);
+
+/// What a host call is doing, for `VICTORY_STALL_SECONDS`: a stall report that only named the
+/// frame would not say whether the render thread was reading textures, encoding or waiting for
+/// the GPU. The most recent phase a host call entered is kept with its start; two atomic stores
+/// per phase, so this is on whatever the trace switch says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    /// Waiting for the lock that keeps submissions in order.
+    Order,
+    /// Reading, hashing and detiling textures, without the host's lock.
+    Prepare,
+    /// Uploading textures, probing and applying the scan, under the host's lock.
+    Apply,
+    /// Recording and committing the command lists, under the host's lock.
+    Encode,
+    /// A present, and whatever it waits for.
+    Present,
+    /// Making and compiling a pipeline.
+    Pipeline,
+}
+
+impl Phase {
+    pub fn name(self) -> &'static str {
+        match self {
+            Phase::Order => "waiting for the submission order",
+            Phase::Prepare => "reading and detiling textures",
+            Phase::Apply => "uploading textures (host lock)",
+            Phase::Encode => "encoding command lists (host lock)",
+            Phase::Present => "presenting",
+            Phase::Pipeline => "making a pipeline",
+        }
+    }
+}
+
+/// The phase a host call is in: its one-based code (0: none), when it began (µs since the
+/// process's clock started) and the host thread's number.
+static PHASE: AtomicUsize = AtomicUsize::new(0);
+static PHASE_AT_US: AtomicU64 = AtomicU64::new(0);
+static PHASE_TID: AtomicU64 = AtomicU64::new(0);
+
+fn phase_code(phase: Phase) -> usize {
+    phase as usize + 1
+}
+
+/// A host call entered `phase`.
+pub fn enter(phase: Phase) {
+    PHASE_AT_US.store((since_start() * 1e6) as u64, Ordering::Relaxed);
+    PHASE_TID.store(TID.with(|t| *t), Ordering::Relaxed);
+    PHASE.store(phase_code(phase), Ordering::Release);
+}
+
+/// No host call is in a phase any more (the call returned).
+pub fn leave() {
+    PHASE.store(0, Ordering::Release);
+}
+
+/// The phase the last host call entered and how long ago, if one is in a phase: what a stall
+/// report says when no present has come for a while.
+pub fn phase_now() -> Option<(&'static str, f64, u64)> {
+    let code = PHASE.load(Ordering::Acquire);
+    if code == 0 {
+        return None;
+    }
+    let phase = match code - 1 {
+        0 => Phase::Order,
+        1 => Phase::Prepare,
+        2 => Phase::Apply,
+        3 => Phase::Encode,
+        4 => Phase::Present,
+        5 => Phase::Pipeline,
+        _ => return None,
+    };
+    let at = PHASE_AT_US.load(Ordering::Relaxed) as f64 / 1e6;
+    Some((phase.name(), (since_start() - at).max(0.0), PHASE_TID.load(Ordering::Relaxed)))
 }
 
 /// The host's lock was waited for and then held: from [`lock_wait`] and [`lock_held`].
@@ -221,6 +304,13 @@ pub fn take_why() -> Vec<(&'static str, u64, u64)> {
     out
 }
 
+/// A submission left its textures for the next frame: the frame's texture-work budget was spent.
+pub(crate) fn sync_deferred() {
+    if enabled() {
+        add(&C.sync_deferred, 1);
+    }
+}
+
 /// What a submission's texture work cost, as `textures::SyncCost` measures it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn textures(
@@ -268,6 +358,7 @@ pub struct Taken {
     pub lock_wait_us: u64,
     pub lock_hold_us: u64,
     pub put_offs: u64,
+    pub sync_deferred: u64,
     pub pipes_asked: u64,
     pub pipes_us: u64,
     pub pipes_made: u64,
@@ -305,6 +396,7 @@ pub fn take_window() -> Taken {
         lock_wait_us: take(&C.lock_wait_us),
         lock_hold_us: take(&C.lock_hold_us),
         put_offs: take(&C.put_offs),
+        sync_deferred: take(&C.sync_deferred),
         pipes_asked: take(&C.pipes_asked),
         pipes_us: take(&C.pipes_us),
         pipes_made: take(&C.pipes_made),
@@ -333,4 +425,33 @@ pub fn next_present() -> (u64, f64, f64) {
     let last = LAST.swap(now_us, Ordering::Relaxed);
     let gap_ms = if last == 0 { 0.0 } else { now_us.saturating_sub(last) as f64 / 1000.0 };
     (n, now_us as f64 / 1e6, gap_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host call's phase is readable from another thread with the name, its age and the host
+    /// thread's number: what the stall report prints when a frame has not come.
+    #[test]
+    fn the_phase_in_progress_is_readable() {
+        // The phases are one global: hold the tests that write it one at a time.
+        static ONE: Mutex<()> = Mutex::new(());
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        leave();
+        assert_eq!(phase_now(), None);
+        let before = phase_now();
+        enter(Phase::Encode);
+        let (name, age, tid) = phase_now().expect("a phase is in progress");
+        assert_eq!(name, "encoding command lists (host lock)");
+        assert!(age >= 0.0);
+        assert!(tid >= 1 && before.is_none());
+        std::thread::sleep(Duration::from_millis(20));
+        let (_, later, _) = phase_now().unwrap();
+        assert!(later > age, "the age grows while the call is in the phase");
+        enter(Phase::Prepare);
+        assert_eq!(phase_now().unwrap().0, "reading and detiling textures");
+        leave();
+        assert_eq!(phase_now(), None);
+    }
 }

@@ -389,14 +389,122 @@ pub fn to_host(format: u32, texels: &mut [u8]) {
 pub(crate) struct Level {
     pub(crate) mip: usize,
     pub(crate) slice: usize,
-    pub(crate) texels: Vec<u8>,
+    pub(crate) texels: Texels,
     pub(crate) row: usize,
     pub(crate) slice_pitch: usize,
+}
+
+/// A level's texels: owned (what a fresh detile makes, and what a deflated cache entry is
+/// inflated into), or a window of a cache entry's mapping — its pages are clean and file-backed,
+/// so an upload reads them without a copy of the level in anonymous memory (`mmap`).
+#[derive(Clone)]
+pub(crate) enum Texels {
+    Owned(Vec<u8>),
+    Mapped(std::sync::Arc<crate::mmap::Map>, std::ops::Range<usize>),
+}
+
+impl Texels {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Texels::Owned(bytes) => bytes,
+            Texels::Mapped(map, range) => &map.bytes()[range.clone()],
+        }
+    }
+
+    /// Whether the texels are a cache entry's mapping rather than the heap (tests: a cache hit
+    /// uploads from the file, a decode from memory).
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn is_mapped(&self) -> bool {
+        matches!(self, Texels::Mapped(..))
+    }
+}
+
+impl From<Vec<u8>> for Texels {
+    fn from(bytes: Vec<u8>) -> Self {
+        Texels::Owned(bytes)
+    }
 }
 
 fn is_all_zero(bytes: &[u8]) -> bool {
     let (chunks, tail) = bytes.as_chunks::<64>();
     chunks.iter().all(|&c| c == [0u8; 64]) && tail.iter().all(|&b| b == 0)
+}
+
+/// Pages (16 KiB, the release path's own granularity) of title memory a *host* writer — a
+/// DirectStorage read, a file read, XG tiling — wrote, each with the serial of the write that last
+/// touched it. It is how the host tells the bytes of a texture that arrived through the title's
+/// streamer from ones the title's own code stored: the report counts the decoded copies by it
+/// (`DecodedReport::streamed`), and a streamed copy's console bytes are given back to the OS as
+/// soon as they are uploaded (`Title::release_streamed`), since a streamed texture is read by the
+/// GPU and not by the CPU again.
+static HOST_WRITES: std::sync::Mutex<std::collections::BTreeMap<usize, u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Serial of the next host write: monotonic, so "written since" is one comparison.
+static WRITE_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Bytes of title memory host writers wrote since the start (cumulative: the streamed total).
+static STREAMED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Pages [`HOST_WRITES`] keeps at most (2^20 × 16 KiB = 16 GiB of written memory): past it the
+/// entries older than the last 2^20 writes go, and a texture read from memory written longer ago
+/// is not counted as streamed (it is not released: the conservative side).
+const HOST_WRITES_MAX: usize = 1 << 20;
+
+/// The serial of host writes so far: a texture read records it, and the next read asks
+/// [`host_wrote_since`] about the writes after it.
+pub(crate) fn write_serial() -> u64 {
+    WRITE_SERIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bytes of title memory host writers (DirectStorage staging, file reads, XG tiling) wrote since
+/// the start.
+pub fn streamed_bytes() -> u64 {
+    STREAMED_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Records that a host writer wrote `[at, at + len)`: [`crate::title_memory_write`] calls it
+/// before the write. Cheap (a map insert per page) and takes no lock the GPU thread waits on.
+pub(crate) fn host_wrote(at: usize, len: usize) {
+    const PAGE: usize = 1 << 14;
+    if len == 0 {
+        return;
+    }
+    let serial = WRITE_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    STREAMED_BYTES.fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
+    let mut writes = HOST_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut page = at & !(PAGE - 1);
+    let end = at.saturating_add(len);
+    while page < end {
+        writes.insert(page, serial);
+        page = page.saturating_add(PAGE);
+        if page == 0 {
+            break;
+        }
+    }
+    if writes.len() > HOST_WRITES_MAX {
+        let floor = serial.saturating_sub(HOST_WRITES_MAX as u64);
+        writes.retain(|_, s| *s >= floor);
+    }
+}
+
+/// Whether a host writer wrote any page of `[at, at + len)` after `since` (a serial from
+/// [`write_serial`]).
+pub(crate) fn host_wrote_since(at: usize, len: usize, since: u64) -> bool {
+    const PAGE: usize = 1 << 14;
+    let end = at.saturating_add(len);
+    let mut page = at & !(PAGE - 1);
+    if page >= end || len == 0 {
+        return false;
+    }
+    let writes = HOST_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    while page < end {
+        if writes.get(&page).is_some_and(|&s| s > since) {
+            return true;
+        }
+        page = page.saturating_add(PAGE);
+        if page == 0 {
+            break;
+        }
+    }
+    false
 }
 
 /// Detiles the mips of `tiled` needed to bring a host texture up to date. Mips whose bit in
@@ -458,7 +566,7 @@ fn detile_changed(
                 return (levels, detiled_mips, Err(format!("detile mip {mip} slice {slice}: {e:?}")));
             }
             to_host(format, &mut texels);
-            levels.push(Level { mip: mip as usize - skip, slice: slice as usize, texels, row, slice_pitch });
+            levels.push(Level { mip: mip as usize - skip, slice: slice as usize, texels: texels.into(), row, slice_pitch });
         }
         detiled_mips |= bit;
     }
@@ -475,7 +583,7 @@ fn detile(layout: &Layout, dimension: Dimension, format: u32, tiled: &[u8], skip
 
 fn upload_levels<B: ResourceBackend>(backend: &B, tex: &B::Texture, levels: &[Level]) {
     for l in levels {
-        backend.upload_texture(tex, l.mip, l.slice, &l.texels, l.row, l.slice_pitch);
+        backend.upload_texture(tex, l.mip, l.slice, l.texels.as_slice(), l.row, l.slice_pitch);
     }
 }
 
@@ -630,6 +738,13 @@ impl Watch {
     /// Texture `key` is gone. Its hash goes with it: the key (an object's address, a placement)
     /// names another texture later, and a render target compared with the old one's hash had
     /// its memory uploaded over what was drawn into it.
+    /// The copy's title pages are out: reading them would upload zeros over it, so nothing
+    /// watches it until they are back ([`Title::restore_pages`]). Its key is not forgotten: a
+    /// scanner round that is mid-read discards its own reading (`known` finds no entry).
+    fn skip(&mut self, key: usize) {
+        self.released(key);
+    }
+
     fn released(&mut self, key: usize) {
         self.entries.remove(&key);
         self.pools.remove(&key);
@@ -779,6 +894,18 @@ pub struct Tracked<B: ResourceBackend> {
     /// Sampled straight from title memory ([`Title::zero_copy`]): no decoded copy, so it holds no
     /// bytes of the budget, is never uploaded or watched, and is never given up.
     zero_copy: bool,
+    /// Whether the content its host texture holds arrived through a host writer — a DirectStorage
+    /// read, a file read, XG tiling — rather than the title's own stores ([`host_wrote_since`]).
+    /// The report splits the decoded copies by it; [`Title::release_streamed`] gives such a copy's
+    /// console bytes back to the OS as soon as it is uploaded.
+    streamed: bool,
+    /// [`write_serial`] when its memory was last read whole: writes after it are what
+    /// [`Self::streamed`] is decided by.
+    write_serial: u64,
+    /// A host write landed in its pages while they were released: the streamer is filling this
+    /// texture again, so its pages are not given back eagerly any more (each would fault back into
+    /// a whole re-read of it).
+    restreamed: bool,
     /// When a view, a submission or an upload last used it: the clock
     /// [`Title::release_quiescent`] gives its pages back on. Frames do not do: a paged world
     /// presents once every several seconds, so 600 frames can be hours.
@@ -833,6 +960,15 @@ const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
 /// not per submission: 30 submissions each below a per-submission bound still made 1.1 GiB a frame
 /// (the first run of a per-submission `SCAN_BUDGET`). Guess: under the world's own 1.9 GiB.
 const SCAN_BUDGET: u64 = 384 << 20;
+/// How much of one frame's wall time the host's texture work may take: listing what to sync,
+/// reading, hashing and detiling the textures, and uploading them. Bytes are not enough of a
+/// bound ([`SCAN_BUDGET`]): the same changed memory is read in a second while it is resident and
+/// in twenty when the Mac is swapping it, and that took whole frames past the title's 30 s
+/// watchdog on 28 November (frames of 19.6, 20.4 and 37.9 s in a row, the last ending the run at
+/// the fail-fast). Past this, `glue::submit` defers the rest of the frame's texture reads: they
+/// stay changed, or not uploaded yet, for the next submission, so a texture is at most a frame
+/// late instead of ending the run.
+pub(super) const FRAME_TEXTURE_WORK: std::time::Duration = std::time::Duration::from_millis(3000);
 /// Hot textures a submission probes at least, however long the probes take.
 const MIN_SYNC_HOT: usize = 32;
 /// Pages of a large hot texture's memory a probe reads, spread over it.
@@ -1370,21 +1506,23 @@ impl<B: PresentBackend> Title<B> {
         }
         // One buffer-backed texture is one 2D image of one mip: a linear mip chain (smallest
         // first) or a slice stack is not one.
-        if info.dimension != Dimension::Tex2d
-            || info.depth_or_layers != 1
-            || info.layout.mips.len() != 1
-            || info.layout.mips[0].depth > 1
-            || info.dropped_levels() != 0
-            || desc.mips != 1
-            || desc.width != info.width as usize
-            || desc.height != info.height as usize
-        {
-            return Some(Decoded::Layout);
-        }
+        let one_image = info.dimension == Dimension::Tex2d
+            && info.depth_or_layers == 1
+            && info.layout.mips.len() == 1
+            && info.layout.mips[0].depth <= 1
+            && info.dropped_levels() == 0
+            && desc.mips == 1
+            && desc.width == info.width as usize
+            && desc.height == info.height as usize;
         // Block-compressed bytes cannot be a texture over a buffer at all (Metal asserts on the
-        // alignment query), so BC1-BC7 are decoded whatever their layout.
+        // alignment query), so BC1-BC7 are decoded whatever their layout or tiling. Checked
+        // before both, so the report tells a streamed asset (BC, tiled, a mip chain) from an
+        // uncompressed mip chain or tiling, which a host could some day alias.
         if desc.format.block().0 == 4 {
-            return Some(Decoded::BcPack);
+            return Some(if one_image { Decoded::BcPack } else { Decoded::BcMipped });
+        }
+        if !one_image {
+            return Some(Decoded::Layout);
         }
         // The host must read the console's bytes as its own: DXGI B4G4R4A4's nibbles are rotated
         // on upload, and a format Metal lacks is never a texture at all.
@@ -1456,6 +1594,13 @@ impl<B: PresentBackend> Title<B> {
         self.release_pages = on;
     }
 
+    /// Turns giving a streamed copy's pages back at its upload on or off for this title (tests: the
+    /// default is off there, see [`Title::release_streamed`]).
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn set_release_streamed(&mut self, on: bool) {
+        self.release_streamed = on;
+    }
+
     /// Makes `key` look unused since `at` (tests: the release threshold is wall time).
     #[cfg(all(test, target_os = "macos"))]
     pub(super) fn set_texture_last_used_at(&mut self, key: usize, at: std::time::Instant) {
@@ -1525,6 +1670,9 @@ impl<B: PresentBackend> Title<B> {
                     target_views: Vec::new(),
                     gpu_written: false,
                     zero_copy: true,
+                    streamed: false,
+                    write_serial: write_serial(),
+                    restreamed: false,
                     last_used_at: std::time::Instant::now(),
                     used: self.budget.serial,
                     last_named: 0,
@@ -1617,6 +1765,9 @@ impl<B: PresentBackend> Title<B> {
                 target_views: Vec::new(),
                 gpu_written: false,
                 zero_copy: false,
+                streamed: false,
+                write_serial: write_serial(),
+                restreamed: false,
                 last_used_at: std::time::Instant::now(),
                 used: self.budget.serial,
                 last_named: 0,
@@ -1859,6 +2010,19 @@ impl<B: PresentBackend> Title<B> {
             .find(|(_, placements)| placements.iter().any(|&(_, placed)| placed == key))
             .map_or(key, |(&object, _)| object);
         let key = self.owner_of(key);
+        // A released copy the GPU is about to write: its pages are `PROT_NONE` and its console bytes
+        // were given back. They are put back from the texture (the last complete content) before the
+        // write runs, and the copy stays home from then on: a GPU-written texture is never released.
+        if self.released.contains_key(&key) && !self.restore_pages(key) {
+            if let Some(t) = self.textures.get(&key) {
+                let info = t.info.clone();
+                let (tstart, tend) = page_range(info.memory as usize, info.size);
+                faults::restore(tstart, tend - tstart);
+                let _ = protect(tstart, tend - tstart, PROT_READ_WRITE);
+            }
+            self.released.remove(&key);
+            self.unloaded.insert(key);
+        }
         if let Some(t) = self.textures.get_mut(&key) {
             t.gpu_written = true;
             t.last_frame = crate::queue::presented();
@@ -2534,6 +2698,47 @@ impl<B: PresentBackend> Title<B> {
         self.jobs(keys)
     }
 
+    /// What this frame has left of [`FRAME_TEXTURE_WORK`] for textures: zero once a frame's
+    /// submissions have spent it, whatever a world load lists. The work it does not do stays
+    /// listed (changed, or not uploaded yet) for the next frame.
+    pub(super) fn texture_work_left(&mut self, budget: std::time::Duration) -> std::time::Duration {
+        self.texture_work_left_at(crate::queue::presented(), budget)
+    }
+
+    /// [`Self::texture_work_left`] in frame `frame` (tests: the frame counter does not move
+    /// without a present).
+    pub(super) fn texture_work_left_at(&mut self, frame: u64, budget: std::time::Duration) -> std::time::Duration {
+        if self.budget.work_frame != frame {
+            self.budget.work_frame = frame;
+            self.budget.work_spent = std::time::Duration::ZERO;
+        }
+        budget.saturating_sub(self.budget.work_spent)
+    }
+
+    /// That this frame's textures took `took`: [`Self::texture_work_left`] shrinks by it.
+    pub(super) fn spent_texture_work(&mut self, took: std::time::Duration) {
+        self.budget.work_spent = self.budget.work_spent.saturating_add(took);
+    }
+
+    /// Textures listed for this submission's sync that this frame may not read: they stay
+    /// changed, and a never-uploaded one stays a first upload, for the next submission
+    /// ([`FRAME_TEXTURE_WORK`]).
+    pub(super) fn defer_reads(&mut self, jobs: Vec<Job>) {
+        if jobs.is_empty() {
+            return;
+        }
+        watch(|w| {
+            for j in &jobs {
+                w.dirty.insert(j.key);
+            }
+        });
+        for j in jobs {
+            if j.last.is_none() {
+                self.unloaded.insert(j.key);
+            }
+        }
+    }
+
     pub(super) fn jobs(&self, keys: Vec<usize>) -> Vec<Job> {
         let pools = self.host.memory();
         let job = |key| {
@@ -2555,6 +2760,7 @@ impl<B: PresentBackend> Title<B> {
                 uploaded_mips: t.uploaded_mips,
                 partial: t.partial,
                 skip: t.dropped,
+                write_serial: t.write_serial,
             })
         };
         let out: Vec<Job> = keys.into_iter().filter_map(job).collect();
@@ -2580,6 +2786,11 @@ impl<B: PresentBackend> Title<B> {
         self.trimmed_pool_gen = pool_gen;
         let keys: Vec<usize> = self.trimmed.iter().copied().collect();
         for key in keys {
+            // Its pages are out: the copy is the only whole one, and a texture made again here
+            // starts empty (the pages are put back before it is replaced).
+            if self.released.contains_key(&key) {
+                continue;
+            }
             let Some((new_dropped, floor, new_desc)) = self.textures.get(&key).and_then(|t| {
                 let d = unmapped_leading_mips(&t.info, pools);
                 (d < t.dropped)
@@ -2634,6 +2845,7 @@ impl<B: PresentBackend> Title<B> {
         let started = std::time::Instant::now();
         let mut cost = SyncCost { batches: 1, prepare: prepared.took, ..Default::default() };
         let mut read = Vec::new();
+        let mut streamed = Vec::new();
         for r in prepared.ready {
             cost.textures += 1;
             cost.bytes += r.bytes as u64;
@@ -2695,6 +2907,8 @@ impl<B: PresentBackend> Title<B> {
             }
             upload_levels(&host.backend, &t.texture, &levels);
             t.last = Some(r.hash);
+            t.streamed = r.streamed;
+            t.write_serial = r.read_serial;
             // Its memory changed: the title is using it (a streamed texture, a movie's plane).
             t.last_frame = crate::queue::presented();
             t.last_used_at = std::time::Instant::now();
@@ -2713,6 +2927,14 @@ impl<B: PresentBackend> Title<B> {
             }
             if !t.kept_from_memory() {
                 read.push((key, entry, r.hash, r.unreadable));
+            }
+            // A streamed texture whose pages are all there: the streamer put the console's bytes
+            // in title memory for the GPU, and the decoded copy holds them now. The title's pages
+            // go back to the OS, so the texture costs one copy and not two — the win this path
+            // exists for. A partial one (fine mips not mapped yet) waits: the next mip it streams
+            // would fault a page back at once.
+            if r.streamed && !r.blank && !r.unreadable && !t.restreamed {
+                streamed.push(key);
             }
         }
         let pools = host.memory();
@@ -2739,6 +2961,13 @@ impl<B: PresentBackend> Title<B> {
                 }
             }
         });
+        // Outside the loop above (it borrows the textures): a streamed copy's console bytes go back
+        // to the OS now that the decoded copy holds them.
+        if self.release_streamed {
+            for key in streamed {
+                self.release_pages(key);
+            }
+        }
         cost.upload = started.elapsed();
         cost.publish();
         if env_set!("VICTORY_TRACE_TEXTURE_SYNC") {
@@ -2765,6 +2994,8 @@ pub(super) struct Job {
     partial: bool,
     /// Top levels the host texture was made without ([`TextureInfo::dropped_levels`]).
     skip: usize,
+    /// [`write_serial`] when its memory was last read whole ([`Tracked::write_serial`]).
+    write_serial: u64,
 }
 
 /// What a [`Job`]'s memory held when [`prepare`] read it.
@@ -2779,6 +3010,11 @@ struct Ready {
     unreadable: bool,
     /// All zeros.
     blank: bool,
+    /// The content read arrived through a host writer (a DirectStorage read, a file read, XG
+    /// tiling): [`host_wrote_since`] found a write after the last whole read.
+    streamed: bool,
+    /// [`write_serial`] before the read: what the next read's [`Self::streamed`] compares with.
+    read_serial: u64,
     /// Detiled levels, bitmask of mips detiled, and how that went; `None` when the host texture
     /// holds this content already.
     levels: Option<(Vec<Level>, u32, Result<(), String>)>,
@@ -2817,6 +3053,9 @@ impl Job {
     /// faults in new pages) and detiles it unless it is what the host texture holds.
     fn read(&self, tiled: &mut Vec<u8>) -> Ready {
         let started = std::time::Instant::now();
+        // Before the read: a host write that lands after it is the next read's to see, and one that
+        // landed before it (the streamer's) is this read's.
+        let read_serial = write_serial();
         // Sampled before the whole read: a write between the two is then a change to the next
         // probe, not part of what it compares with.
         let probe = probe_hash(
@@ -2873,6 +3112,8 @@ impl Job {
             probe,
             unreadable,
             blank,
+            streamed: host_wrote_since(self.memory, self.size, self.write_serial),
+            read_serial,
             levels,
             cost: [read, hashed - read, started.elapsed() - hashed],
         }
@@ -3010,6 +3251,10 @@ pub struct Budget {
     /// of those submissions name each: never given up until the submission is handed to its queue
     /// ([`Title::keep_named`], [`Title::let_named_go`]).
     named: HashMap<usize, u32>,
+    /// The frame ([`crate::queue::presented`]) the texture work below was last counted in, and how
+    /// much of one frame's [`FRAME_TEXTURE_WORK`] its submissions have spent.
+    work_frame: u64,
+    work_spent: std::time::Duration,
 }
 
 impl Budget {
@@ -3224,8 +3469,48 @@ pub fn release_pages_on() -> bool {
     *ON.get_or_init(|| !std::env::var("VICTORY_TEXTURE_RELEASE_PAGES").is_ok_and(|v| v == "0"))
 }
 
+/// `VICTORY_TEXTURE_RELEASE_STREAMED=0` turns it off: give a streamed copy's title pages back to
+/// the OS as soon as it is uploaded, rather than once it has gone unused for `release_seconds`.
+/// A texture whose bytes a DirectStorage read put into title memory is there for the GPU: the
+/// decoded Metal texture is the only copy anything samples, and the title's own CPU access to
+/// those pages (which a streamer does not do) faults them back from it (`Title::release_pages`).
+/// That is the duplicate copy: the console's bytes in the title's pages beside the decoded one.
+/// On by default, and pointless without the page-fault path (`faults::active`).
+pub fn release_streamed_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !std::env::var("VICTORY_TEXTURE_RELEASE_STREAMED").is_ok_and(|v| v == "0"))
+}
+
+/// The process's resident bytes and `phys_footprint`, as the memory line samples them (0 off
+/// macOS): `VICTORY_TRACE_RELEASE_RSS` logs both across a release batch.
+fn resident_and_footprint() -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    return (victory_platform::mem::resident() as u64, victory_platform::mem::footprint() as u64);
+    #[cfg(not(target_os = "macos"))]
+    (0, 0)
+}
+
 /// Pages given back to the OS by [`Title::release_pages`], and the titles whose pages are out.
 static RELEASED_TRACE: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+/// Of those, the streamed copies and bytes given back as soon as they were uploaded
+/// ([`Title::release_streamed`]): the duplicate copy removed. [2] and [3] are the ones a host write
+/// took back (a texture the streamer fills again), and their bytes.
+static RELEASED_STREAM: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Streamed copies whose title pages were given back, and their bytes: what
+/// `VICTORY_TEXTURE_RELEASE_STREAMED` removed from title memory.
+pub fn streamed_released_bytes() -> u64 {
+    RELEASED_STREAM[1].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Streamed copies whose released pages a host write opened again (the streamer filling a texture
+/// it had finished), and their bytes: a cost of releasing eagerly, logged beside the win.
+pub fn streamed_released_undone() -> (u64, u64) {
+    (
+        RELEASED_STREAM[2].load(std::sync::atomic::Ordering::Relaxed),
+        RELEASED_STREAM[3].load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
 
 /// Bytes of decoded copies whose title pages were given back to the OS, and how many.
 pub fn released_bytes() -> u64 {
@@ -3265,16 +3550,20 @@ pub fn release_frames() -> u64 {
 /// answer to "why is the copy pool this big" (`glue::memory_parts`).
 #[derive(Default, Clone, Copy, Debug)]
 pub struct DecodedReport {
-    /// The console's swizzle is not linear (the largest reason for a world).
+    /// Bytes of every decoded copy: the reasons below (`tiled` to `other`) add up to it exactly,
+    /// each copy counted once under the first reason [`Title::decoded_reason`] finds.
+    pub decoded: u64,
+    /// Uncompressed, one image, and the console's swizzle is not linear.
     pub tiled: u64,
-    /// Block-compressed (BCPack's output, unpacked by the title): a part of the decoded pool,
-    /// whatever the reason it is decoded for.
+    /// Block-compressed (BCPack's output, unpacked by the title), one image of one mip.
     pub bcpack: u64,
+    /// Block-compressed with a mip chain, slices or a volume: the typical streamed asset.
+    pub bc_mipped: u64,
     /// A format Metal cannot read as the console's bytes.
     pub format: u64,
     /// Depth and stencil.
     pub depth: u64,
-    /// A mip chain, a slice stack or a volume.
+    /// Uncompressed, and a mip chain, a slice stack or a volume.
     pub layout: u64,
     /// Multisampled.
     pub multisampled: u64,
@@ -3282,27 +3571,83 @@ pub struct DecodedReport {
     pub alignment: u64,
     /// A copy Metal could have taken from title memory (zero-copy off, or creation refused).
     pub other: u64,
-    /// Of the decoded copies, those the GPU writes (render targets, depth, unordered access).
+    /// Of the decoded copies, those the GPU writes (render targets, depth, unordered access), and
+    /// the rest, which hold only the title's bytes (what page release and the budget act on):
+    /// the two add up to `decoded`.
     pub written: u64,
+    pub sampled_only: u64,
+    /// Of the decoded copies, those whose content arrived through a host writer (a DirectStorage
+    /// read, a file read, XG tiling): the streamer's textures, whose console bytes are all still in
+    /// title memory as well — the duplicate copy this host exists to remove.
+    pub streamed: u64,
+    /// Of those, the ones only the console's swizzle kept from being a texture over title memory
+    /// (detiled, not decoded from another format).
+    pub streamed_detiled: u64,
+    /// Of those, the ones unpacked from BCPack/BCn (a decoder, not a detile).
+    pub streamed_bcpack: u64,
+    /// Bytes of title memory under the decoded copies ([`Title::memory_under_copies`]): with the
+    /// copies, what a streamed texture costs twice.
+    pub under_copies: u64,
+    /// Of those, bytes of copies over memory another live copy already holds
+    /// ([`Title::duplicate_copies`]): the same pool pages at one title address or several.
+    pub duplicate_copies: u64,
     /// Bytes and count sampled or rendered where the title wrote them.
     pub zero_copy: u64,
     pub zero_copy_copies: u64,
     /// Of the decoded copies, those a block permutation could turn into the pages themselves
-    /// ([`Title::in_place_bytes`]): block-compressed, tiled, one mip, sampled only, and their
-    /// linear image fits the bytes the title allocated. Decoding those in place would leave one
-    /// resident copy instead of two.
+    /// ([`Title::in_place_bytes`]): uncompressed, tiled, one mip, sampled only, and their linear
+    /// image fits the bytes the title allocated. Decoding those in place would leave one resident
+    /// copy instead of two.
     pub in_place: u64,
     pub in_place_copies: u64,
 }
 
+impl DecodedReport {
+    /// The reasons, in the memory line's order: `tiled`, `bcpack`, `bc_mipped`, `format`,
+    /// `depth`, `layout`, `multisampled`, `alignment`, `other`. They add up to `decoded`.
+    pub fn reasons(&self) -> [u64; 9] {
+        [
+            self.tiled,
+            self.bcpack,
+            self.bc_mipped,
+            self.format,
+            self.depth,
+            self.layout,
+            self.multisampled,
+            self.alignment,
+            self.other,
+        ]
+    }
+
+    /// [`Self::reasons`] in whole MiB that add up to `decoded >> 20` exactly: each is rounded
+    /// down, and the MiB the rounding lost go to those with the largest remainders.
+    pub fn reasons_mib(&self) -> [u64; 9] {
+        let bytes = self.reasons();
+        let mut mib = bytes.map(|b| b >> 20);
+        let total = bytes.iter().sum::<u64>() >> 20;
+        let mut short = total.saturating_sub(mib.iter().sum());
+        let mut order: Vec<usize> = (0..bytes.len()).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(bytes[i] & ((1 << 20) - 1)), i));
+        for i in order {
+            if short == 0 {
+                break;
+            }
+            mib[i] += 1;
+            short -= 1;
+        }
+        mib
+    }
+}
+
 impl<B: PresentBackend> Title<B> {
     /// The bytes of `t`'s decoded copy when a block permutation of the title's own pages could
-    /// hold Metal's linear image in the same bytes (`None`: it cannot). The console's tiling of a
-    /// block-compressed format moves whole blocks, and BC1-BC7 are Metal's own formats, so BC in
-    /// and BC out are the same bytes: the copy would be the pages themselves, no second resident
-    /// copy. What keeps this from being done is the title's own later use of those pages (a mip
-    /// streamed into them, a copy out of them), which needs write protection; this measures what
-    /// would be won.
+    /// hold Metal's linear image in the same bytes (`None`: it cannot): an uncompressed, tiled,
+    /// single-mip 2D texture that is only sampled. The console's tiling moves whole elements and
+    /// the format is Metal's own, so the copy would be the pages themselves, no second resident
+    /// copy. Block-compressed textures do not qualify: Metal cannot make a texture over a buffer
+    /// in a BC format. What keeps this from being done is the title's own later use of those
+    /// pages (a mip streamed into them, a copy out of them), which needs write protection; this
+    /// measures what would be won.
     fn in_place_bytes(&self, t: &Tracked<B>) -> Option<u64> {
         if t.zero_copy {
             return None;
@@ -3407,6 +3752,15 @@ impl<B: PresentBackend> Title<B> {
         self.released.insert(key, info.size as u64);
         RELEASED_TRACE[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         RELEASED_TRACE[1].fetch_add(info.size as u64, std::sync::atomic::Ordering::Relaxed);
+        if t.streamed {
+            RELEASED_STREAM[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            RELEASED_STREAM[1].fetch_add(info.size as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        // The scanner and the probes read title memory: a read of a page that is out is zeros (the
+        // kernel's read fails, nothing faults for it), which would upload over the copy. The copy
+        // is not watched until its pages are back (`restore_pages`), and a title or host write
+        // that opens a page is what brings it back for a fresh read (`drop_host_written`).
+        watch(|w| w.skip(key));
         true
     }
 
@@ -3421,6 +3775,7 @@ impl<B: PresentBackend> Title<B> {
             return false;
         };
         let info = t.info.clone();
+        let serial = t.serial;
         let Ok((_buffer, at)) = self.host.resolve(info.memory as u64, info.size as u64) else { return false };
         // Ours no more first (a fault on a page already restored must not wait), then writable.
         // Only the title's mapping was released; the pool's alias stayed writable.
@@ -3433,9 +3788,21 @@ impl<B: PresentBackend> Title<B> {
         }
         // SAFETY: `resolve` gave `size` mapped, writable bytes of the pool; the buffer is kept.
         unsafe { std::ptr::copy_nonoverlapping(tiled.as_ptr(), at.cast_mut(), tiled.len()) };
+        let hash = blake3::hash(&tiled);
         if let Some(t) = self.textures.get_mut(&key) {
-            t.last = Some(blake3::hash(&tiled));
+            t.last = Some(hash);
+            // The title read or wrote those pages: they are its own now, and are not given back
+            // again (a copy it reads back every frame must not fault every frame).
+            t.streamed = false;
         }
+        // Watched again, from the content it holds: the scanner's next round compares with it
+        // rather than reporting the restore as a write.
+        let pools = self.host.memory();
+        watch(|w| {
+            w.entries.insert(key, (info.memory as usize, info.size, info.render_target(), serial));
+            w.pools.insert(key, pools);
+            w.seen.insert(key, hash);
+        });
         self.released.remove(&key);
         tracing::debug!(texture = key, bytes, "a decoded texture's pages are back in title memory");
         true
@@ -3474,6 +3841,13 @@ impl<B: PresentBackend> Title<B> {
             if let Some(t) = self.textures.get_mut(&key) {
                 t.last_used_at = now;
                 t.last_frame = frame;
+                // The streamer is filling it again: releasing its pages again would only fault
+                // them back into another whole re-read.
+                t.restreamed = true;
+            }
+            if let Some(t) = self.textures.get(&key) {
+                RELEASED_STREAM[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                RELEASED_STREAM[3].fetch_add(t.info.size as u64, std::sync::atomic::Ordering::Relaxed);
             }
             self.unloaded.insert(key);
         }
@@ -3489,8 +3863,12 @@ impl<B: PresentBackend> Title<B> {
     /// [`Self::release_quiescent`] at `now`: a copy goes once it has gone unused for the seconds
     /// threshold **or** the frames threshold, whichever comes first (a paged world's frames are
     /// minutes apart; a fast title's seconds pass between two of its frames).
+    ///
+    /// Nothing is released while the copies are over the budget: the budget's next check would
+    /// take those same idle copies, and to take a released one it first re-tiles it back into
+    /// the title's pages from the GPU ([`Self::keep_to_budget_at`]), work thrown away at once.
     pub(super) fn release_quiescent_at(&mut self, frame: u64, now: std::time::Instant) {
-        if !self.release_pages || self.budget.limit == 0 {
+        if !self.release_pages || self.budget.limit == 0 || self.budget.live > self.budget.limit {
             return;
         }
         let (quiet_secs, quiet_frames) = (release_seconds(), release_frames());
@@ -3504,8 +3882,32 @@ impl<B: PresentBackend> Title<B> {
             })
             .map(|(&k, _)| k)
             .collect();
+        // `VICTORY_TRACE_RELEASE_RSS`: whether giving pages back frees any RAM. The pool's Metal
+        // buffer maps the same pages (`newBufferWithBytesNoCopy`), which may keep them resident.
+        let trace = env_set!("VICTORY_TRACE_RELEASE_RSS") && !keys.is_empty();
+        let before = trace.then(resident_and_footprint);
+        let (mut copies, mut bytes) = (0u64, 0u64);
         for key in keys {
-            self.release_pages(key);
+            if self.release_pages(key) {
+                copies += 1;
+                bytes += self.released.get(&key).copied().unwrap_or(0);
+            }
+        }
+        if let Some((resident, footprint)) = before
+            && copies > 0
+        {
+            let (resident_after, footprint_after) = resident_and_footprint();
+            let mib = |after: u64, before: u64| ((after as f64 - before as f64) / 1048576.0 * 10.0).round() / 10.0;
+            tracing::info!(
+                released_copies = copies,
+                released_mib = (bytes as f64 / 1048576.0 * 10.0).round() / 10.0,
+                released_total_mib = self.released_bytes() >> 20,
+                resident_delta_mib = mib(resident_after, resident),
+                footprint_delta_mib = mib(footprint_after, footprint),
+                resident_mib = resident_after >> 20,
+                footprint_mib = footprint_after >> 20,
+                "release batch: decoded copies' title pages given back, and the process's resident size and footprint across the batch"
+            );
         }
     }
 
@@ -3531,20 +3933,32 @@ impl<B: PresentBackend> Title<B> {
                 r.zero_copy_copies += 1;
                 continue;
             }
-            let desc = t.info.host_desc_with(t.dropped);
-            if desc.as_ref().is_some_and(|d| d.format.block().0 == 4) {
-                r.bcpack += size;
-            }
+            r.decoded += size;
             if self.in_place_bytes(t).is_some() {
                 r.in_place += size;
                 r.in_place_copies += 1;
             }
             if t.info.render_target() || t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
                 r.written += size;
+            } else {
+                r.sampled_only += size;
             }
-            match desc.as_ref().and_then(|d| self.decoded_reason(&t.info, d)) {
+            // One reason per copy, so the reasons add up to `decoded`.
+            let desc = t.info.host_desc_with(t.dropped);
+            let reason = desc.as_ref().and_then(|d| self.decoded_reason(&t.info, d));
+            if t.streamed {
+                r.streamed += size;
+                let block_compressed = desc.as_ref().is_some_and(|d| d.format.block().0 == 4);
+                if block_compressed || reason == Some(Decoded::BcPack) {
+                    r.streamed_bcpack += size;
+                } else {
+                    r.streamed_detiled += size;
+                }
+            }
+            match reason {
                 Some(Decoded::Tiled) => r.tiled += size,
                 Some(Decoded::BcPack) => r.bcpack += size,
+                Some(Decoded::BcMipped) => r.bc_mipped += size,
                 Some(Decoded::Format) => r.format += size,
                 Some(Decoded::Depth) => r.depth += size,
                 Some(Decoded::Layout) => r.layout += size,
@@ -3553,6 +3967,8 @@ impl<B: PresentBackend> Title<B> {
                 None => r.other += size,
             }
         }
+        r.under_copies = self.memory_under_copies().0;
+        r.duplicate_copies = self.duplicate_copies().0;
         r
     }
 }
@@ -3563,17 +3979,20 @@ impl<B: PresentBackend> Title<B> {
 pub enum Decoded {
     /// The console's swizzle (4KB_S, 64KB_*, ...) is not linear.
     Tiled,
-    /// Block-compressed (BC1-BC7: BCPack's output, unpacked by the title). Metal has the formats
-    /// but not over a buffer: `minimumLinearTextureAlignmentForPixelFormat` asserts "linear
-    /// textures do not support compressed pixel formats", so these always need a decoded copy.
+    /// Block-compressed (BC1-BC7: BCPack's output, unpacked by the title), one image of one mip.
+    /// Metal has the formats but not over a buffer: `minimumLinearTextureAlignmentForPixelFormat`
+    /// asserts "linear textures do not support compressed pixel formats", so these always need a
+    /// decoded copy.
     BcPack,
+    /// Block-compressed with a mip chain, slices or a volume (a streamed asset): as `BcPack`.
+    BcMipped,
     /// The format is not Metal's own bytes for it (a conversion on upload, such as DXGI
     /// `B4G4R4A4`'s rotated nibbles).
     Format,
     /// Depth and stencil: Metal's depth texel layout and the host's depth twins.
     Depth,
-    /// More than one mip, or a slice/array or 3D volume, which one buffer-backed texture cannot
-    /// hold: the mip chain is packed into the title's linear layout.
+    /// Uncompressed, with more than one mip, or a slice/array or 3D volume, which one
+    /// buffer-backed texture cannot hold: the mip chain is packed into the title's linear layout.
     Layout,
     /// Multisampled.
     Multisampled,
@@ -4191,6 +4610,27 @@ mod tests {
         assert!(!idle_enough(now, used(1), 601, 601, 20, 600));
     }
 
+    /// The memory line's reasons in whole MiB add up to the decoded pool's MiB: rounding each
+    /// down alone would lose up to a MiB per reason.
+    #[test]
+    fn the_reasons_in_mib_add_up_to_the_decoded_pool() {
+        let half = 1u64 << 19;
+        let r = DecodedReport {
+            tiled: (3 << 20) + half + 1,
+            bcpack: (2 << 20) + half,
+            bc_mipped: 700 << 20,
+            layout: half - 1,
+            decoded: (3 << 20) + half + 1 + (2 << 20) + half + (700 << 20) + half - 1,
+            ..Default::default()
+        };
+        assert_eq!(r.reasons().iter().sum::<u64>(), r.decoded);
+        let mib = r.reasons_mib();
+        assert_eq!(mib.iter().sum::<u64>(), r.decoded >> 20, "{mib:?}");
+        // 706.5 MiB, 705 rounded down one by one: the lost MiB goes to the largest remainder.
+        assert_eq!(&mib[..3], &[4, 2, 700]);
+        assert_eq!(mib[5], 0);
+    }
+
     /// A title texture at `memory`, for the [`written_twin`] test.
     fn described(
         format: u32,
@@ -4786,6 +5226,9 @@ mod tests {
                 size: mem.len(),
             },
             zero_copy: false,
+            streamed: false,
+            write_serial: 0,
+            restreamed: false,
             last_used_at: std::time::Instant::now(),
             serial: 1,
             last: Some(blake3::hash(&mem)),
@@ -4960,6 +5403,9 @@ mod tests {
                         target_views: Vec::new(),
                         gpu_written: false,
                         zero_copy: false,
+                        streamed: false,
+                        write_serial: 0,
+                        restreamed: false,
                         last_used_at: std::time::Instant::now(),
                         last_frame: 0,
                         last_named: 0,

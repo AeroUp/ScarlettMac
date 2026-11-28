@@ -20,6 +20,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use victory_backend::resources::{Format, GraphicsBackend, PresentBackend};
 
 /// A wait for a memory value (`Wait32BitValueX`, `Wait64BitValueX`): the value at `address`
@@ -124,6 +125,18 @@ impl<B: GraphicsBackend> TitleList<B> {
             .chain([(self.list.snapshot(), self.waits.clone())])
             .collect()
     }
+
+    /// [`Self::segments`] that hands the lists over instead of copying them: the caller owns what
+    /// it runs and the title's next recording (after its `Reset`) starts from empty. D3D12 makes
+    /// `ExecuteCommandLists` the last call on a list before `Reset`, so nothing recorded after it
+    /// belongs to this submission. Copies made a 30,000-command world frame's submission spend its
+    /// host time in `malloc` (`sample` of the render thread, runs/20261128-110159-0DwmVl) and held
+    /// the title's lock while every title thread waited for it.
+    pub fn take_segments<P: PresentBackend>(&mut self, _locked: &Title<P>) -> Vec<(NativeList<B>, Vec<Wait>)> {
+        let mut out: Vec<(NativeList<B>, Vec<Wait>)> = std::mem::take(&mut self.done);
+        out.push((std::mem::take(&mut self.list), std::mem::take(&mut self.waits)));
+        out
+    }
 }
 
 /// Counters for the frame line and the tests.
@@ -138,6 +151,8 @@ pub struct Stats {
     pub refused: u64,
     /// Segments that waited for a memory value before they ran.
     pub waited: u64,
+    /// Segment heads the safety valve ran without their waits (`VALVE`): a wait nothing wrote.
+    pub forced: u64,
     /// Empty segments left out with `VICTORY_SKIP_EMPTY_LISTS`: each would have cost a command
     /// buffer and its fence, and done nothing.
     pub skipped: u64,
@@ -217,11 +232,20 @@ fn present_gives_up(starved: bool, since: std::time::Instant, now: std::time::In
 
 pub struct Title<B: PresentBackend> {
     pub host: NativeHost<B>,
-    /// Host pipelines by title pipeline object, made at first use.
-    pub pipelines: HashMap<usize, Pipe<B>>,
+    /// Host pipelines by title pipeline object and the strides their vertex streams step by
+    /// ([`Self::pipeline_streams`]; 0 for a pipeline without stage-in inputs).
+    pub pipelines: HashMap<(usize, u64), Pipe<B>>,
     /// Host pipelines of the console's pipelines (whose state names no target formats) by title
-    /// pipeline object and the targets of the draw ([`super::console_state`]).
-    pub console_pipes: HashMap<(usize, TargetFormats), Pipe<B>>,
+    /// pipeline object, the targets of the draw ([`super::console_state`]) and the strides its
+    /// streams step by.
+    pub console_pipes: HashMap<(usize, TargetFormats, u64), Pipe<B>>,
+    /// Each described pipeline's input streams as (slot, where its elements end, four-byte
+    /// aligned), recorded when its host pipeline is first made. D3D12 steps a stream by the
+    /// vertex view's `StrideInBytes`, which the title may bind differently from one draw to the
+    /// next of the same pipeline, and Metal's vertex descriptor holds the stride: the signature
+    /// of those strides is part of the host pipeline's cache key, so each stride gets a pipeline
+    /// whose descriptor was made for it.
+    pub pipeline_streams: HashMap<usize, Vec<(u32, u32)>>,
     /// Host pipelines of compute pipelines dispatched with thread counts (`DispatchX`), whose
     /// shader is translated for that, by title pipeline object.
     pub thread_pipes: HashMap<usize, Pipe<B>>,
@@ -241,9 +265,15 @@ pub struct Title<B: PresentBackend> {
     /// tiled or decoded copy has to read as that colour).
     pub zero_copy: bool,
     /// Give a decoded copy's title pages back to the OS once nothing has used it for a while
-    /// (`super::textures::release_pages_on`): on only with `VICTORY_TEXTURE_RELEASE_PAGES=1`, and
-    /// off in tests unless one turns it on (a title access to a released page is not caught yet).
+    /// (`super::textures::release_pages_on`): on unless `VICTORY_TEXTURE_RELEASE_PAGES=0`, and off
+    /// in tests unless one turns it on (a title access to a released page is not caught yet).
     pub release_pages: bool,
+    /// Give a *streamed* copy's title pages back as soon as it is uploaded
+    /// (`super::textures::release_streamed_on`): the title's streamer put those bytes there for the
+    /// GPU, the Metal texture is the only copy anything reads, and the title's own access faults
+    /// them back (`Title::release_pages`). The duplicate copy a streamed texture keeps in title
+    /// memory is what fills an 18 GB Mac's swap.
+    pub release_streamed: bool,
     pub(super) libraries: super::shaders::Libraries<B>,
     pub(super) textures: super::textures::Textures<B>,
     /// The byte budget of host texture copies ([`Self::keep_to_budget`]).
@@ -341,12 +371,14 @@ impl<B: PresentBackend> Title<B> {
             host,
             pipelines: HashMap::new(),
             console_pipes: HashMap::new(),
+            pipeline_streams: HashMap::new(),
             thread_pipes: HashMap::new(),
             shaders: Default::default(),
             compile_wait: std::time::Duration::MAX,
             skip_empty_lists: crate::switch::on("VICTORY_SKIP_EMPTY_LISTS"),
             zero_copy: cfg!(not(test)) && crate::native::textures::zero_copy_on(),
             release_pages: cfg!(not(test)) && crate::native::textures::release_pages_on(),
+            release_streamed: cfg!(not(test)) && crate::native::textures::release_streamed_on(),
             libraries: Default::default(),
             textures: Default::default(),
             budget: Default::default(),
@@ -640,6 +672,22 @@ impl<B: PresentBackend> Title<B> {
             actions.remove(&n);
             true
         };
+        // The safety valve the Windows pump has and this one did not (`queue::VALVE`): a head whose
+        // memory waits nothing satisfies -- a write we do not make, a pass dropped for a refused
+        // shader among the writers -- holds its queue for good, and the title thread waiting on that
+        // queue enters a watchdog scope it never leaves (300 s; run `20261128-133911-YLju97` died
+        // there with its last ten minutes silent). Past `VALVE` the head runs anyway and names what
+        // it waited for. Well past the longest wait that resolves (a world frame's barrier, 3 to
+        // 20 s), so a frame in flight is never let go early.
+        for (queue, waits) in valve_forced(held, Self::VALVE) {
+            stats.forced += 1;
+            let limit = Self::VALVE;
+            tracing::warn!(
+                queue = format_args!("{queue:#x}"),
+                ?waits,
+                "held work runs without its waits after {limit:?} (safety valve: nothing wrote what it waited for)"
+            );
+        }
         let done = held.pump(&mut World {
             read: &read,
             fence: &fence,
@@ -651,6 +699,11 @@ impl<B: PresentBackend> Title<B> {
             waiting.remove(&token);
         }
     }
+
+    /// How long a queue's head may wait for a memory value before [`Self::pump`] runs it anyway:
+    /// longer than any wait that resolves (a world frame's cross-queue barrier, 3 to 20 s in the
+    /// runs of 28 November), far short of the title's 300 s watchdog scope.
+    pub const VALVE: Duration = Duration::from_secs(60);
 
     /// The backend queue of each title queue made so far.
     pub fn backend_queues(&self) -> impl Iterator<Item = (usize, &B::Queue)> {
@@ -912,3 +965,30 @@ mod scheduling_tests {
         }
     }
 }
+/// [`Title::pump`]'s safety valve: the segments held past `limit` at the heads of blocked queues,
+/// each with the waits it could not satisfy (they lose them and run).
+fn valve_forced<S>(held: &mut Held<S>, limit: Duration) -> Vec<(usize, Vec<ValueWait>)> {
+    held.force_older_than(limit)
+}
+
+#[cfg(test)]
+mod valve_tests {
+    use super::*;
+    use crate::hold::Item;
+
+    /// The valve takes a head whose waits nothing wrote once it is past the deadline, and leaves
+    /// one inside it: the deadline sits between the longest wait that resolves (a world frame's
+    /// barrier) and the title's 300 s watchdog scope.
+    #[test]
+    fn the_valve_takes_only_a_head_past_its_deadline() {
+        let mut held: Held<&'static str> = Held::default();
+        held.push(2, Item::Segment("frame 5287", vec![ValueWait { address: 0x100, bytes: 8, comparison: 7, reference: 5287, mask: u64::MAX }]));
+        assert!(valve_forced(&mut held, Title::<victory_metal::metal::Metal>::VALVE).is_empty(), "a wait inside the deadline holds");
+        let forced = valve_forced(&mut held, Duration::ZERO);
+        assert_eq!(forced.len(), 1);
+        assert_eq!(forced[0].0, 2);
+        assert_eq!(forced[0].1.len(), 1, "the head loses the wait that never held");
+        assert!(valve_forced(&mut held, Duration::ZERO).is_empty(), "a head already let go is not taken twice");
+    }
+}
+

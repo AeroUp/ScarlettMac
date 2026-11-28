@@ -328,6 +328,14 @@ pub(crate) fn raise_graphics(
                 .iter()
                 .find(|p| p.slot == crate::emit::graphics::VERTEX_TABLE)
                 .map(|p| p.user_data.saturating_add(2)),
+            // A mesh program's root parameters end where its user data do; above them the
+            // hardware initializes nothing the program can depend on (see `Lower::inputs`).
+            StageIo::Ms { .. } => native
+                .layout
+                .iter()
+                .map(|r| u32::from(r.user_data) + r.sgprs)
+                .max()
+                .map(|n| n.min(105) as u8),
             StageIo::Ps { .. } => {
                 let user = native
                     .layout

@@ -741,6 +741,77 @@ pub struct PassSubmission<'a, B: GraphicsBackend + ?Sized> {
     pub signals: &'a [(&'a B::Fence, u64)],
 }
 
+impl<'a, B: GraphicsBackend + ?Sized> PassSubmission<'a, B> {
+    /// Every buffer the submission's passes name: root and vertex buffers, indices, blits,
+    /// indirect records and count buffers, with repeats removed.
+    ///
+    /// A backend that keeps its residency by command buffer rather than by queue needs it
+    /// (`Metal::encode_submission`, `VICTORY_METAL_RESIDENCY_SETS=cb`): what a command buffer
+    /// reaches must be attached to that command buffer and nothing else, or the pools it could
+    /// read are pinned whole.
+    pub fn buffers(&self) -> Vec<&'a B::Buffer> {
+        let mut out: Vec<&'a B::Buffer> = Vec::new();
+        let mut add = |b: &'a B::Buffer| {
+            let at = b as *const B::Buffer;
+            if !out.iter().any(|o| std::ptr::eq(*o as *const B::Buffer, at)) {
+                out.push(b);
+            }
+        };
+        for pass in self.passes {
+            match pass {
+                Pass::Compute(dispatches) => {
+                    for d in dispatches.iter() {
+                        for b in &d.resources {
+                            add(b);
+                        }
+                        if let Some((b, _)) = d.indirect {
+                            add(b);
+                        }
+                        if let Some((b, _, _)) = d.count {
+                            add(b);
+                        }
+                    }
+                }
+                Pass::Render(rp) => {
+                    for d in &rp.draws {
+                        for b in &d.resources {
+                            add(b);
+                        }
+                        for (_, b, _) in &d.vertex_buffers {
+                            add(b);
+                        }
+                        if let Some((b, _)) = &d.index_buffer {
+                            add(b);
+                        }
+                        if let Some((b, _)) = &d.indirect {
+                            add(b);
+                        }
+                        if let Some((b, _, _)) = &d.count {
+                            add(b);
+                        }
+                    }
+                }
+                Pass::Blit(ops) => {
+                    for op in ops {
+                        let (src, dst) = match op {
+                            BlitOp::Copy { src, dst, .. } => (Some(*src), Some(*dst)),
+                            BlitOp::Fill { dst, .. } => (None, Some(*dst)),
+                            BlitOp::CopyBufferToTexture { src, .. }
+                            | BlitOp::CopyTextureToBuffer { dst: src, .. } => (Some(*src), None),
+                            BlitOp::CopyTexture { .. } => (None, None),
+                        };
+                        for b in src.into_iter().chain(dst) {
+                            add(b.0);
+                        }
+                    }
+                }
+                Pass::ClearColorRects { .. } | Pass::Ambient(_) => {}
+            }
+        }
+        out
+    }
+}
+
 /// Why a submission was not made as submitted, and what of it did not run: the caller pays for
 /// the lost work (a dropped pass's value writes never happen, and a queue waiting on one has no
 /// other way to go on).

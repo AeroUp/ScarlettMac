@@ -13,6 +13,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 type Dev = Retained<ProtocolObject<dyn MTLDevice>>;
 
+/// Names kept for pipeline states (see [`Metal::pipe_names`]). The title makes pipelines in
+/// thousands a minute and lets them go, so the map is cleared rather than grown without end; the
+/// live ones are named again as they are made.
+pub(crate) const PIPE_NAMES: usize = 16_384;
+
 pub struct Metal {
     pub(crate) dev: Dev,
     /// Opened at creation when installed; shader compilation reports the error if absent.
@@ -22,6 +27,12 @@ pub struct Metal {
     /// The title's pool buffers in one set on every queue too (`VICTORY_METAL_RESIDENCY_SETS=1`);
     /// off = named by the encoders that use them.
     pub(crate) pool_sets: bool,
+    /// The title's pool buffers in one set per command buffer ("`VICTORY_METAL_RESIDENCY_SETS=cb`"):
+    /// what that command buffer's encoders name, and nothing else, so the pools are not pinned
+    /// whole. A blit has no `useResource:usage:` to name its ranges (`objc2-metal` binds it on the
+    /// render and compute encoders only), so this is the only way to keep a fill into title memory
+    /// reachable without the queue's set.
+    pub(crate) pool_cb_sets: bool,
     /// The set of the title's pool buffers, made when the first one is.
     pool_set: std::cell::RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
     /// What the encoders did to make buffers resident, for the tests and the frame line.
@@ -48,6 +59,8 @@ pub struct Metal {
     pub(crate) trace_enc: std::cell::RefCell<Vec<String>>,
     /// Tracing: the gate buffers of the indirect dispatches encoded since the last commit.
     pub(crate) trace_args: std::cell::RefCell<Vec<(String, usize, usize)>>,
+    /// A pipeline state's name (its shaders' hashes), by pointer: a command buffer the GPU hangs
+    /// on or runs long names its encoders' shaders from here.
     pub(crate) pipe_names: std::cell::RefCell<std::collections::HashMap<usize, String>>,
     /// The kernel that gates `ExecuteIndirect` records by a count (`gfx.rs`), made at first use.
     pub(crate) gate:
@@ -254,8 +267,15 @@ fn residency_mode(asked: Option<&str>, supported: bool, memory: u64, recommended
         // A console's declared title memory is what the pools come to; the copies and the frames in
         // flight live in the heaps' sets. Both must fit the device's working set, or nothing pins.
         None => {
+            // The heaps' sets wherever the device's working set covers the pools. The pools' own
+            // set -- every range of title memory a submission touches, joined to every queue for
+            // the run -- only on a Mac that could hold them twice over: the other half is macOS,
+            // this host, the decoded copies and the page cache (23 GiB of RAM for a Series S's
+            // 7.6 GiB). Where it is off, the pools ride with each command buffer instead
+            // (`pool_cb_sets`), which keeps a blit's ranges reachable without pinning them.
             let fits = recommended >= title + (1 << 30) && recommended >= 8 << 30 && memory >= 16 << 30;
-            (supported && fits, supported && fits)
+            let pin_pools = fits && memory >= 2 * (title + (4 << 30));
+            (supported && fits, supported && pin_pools)
         }
     }
 }
@@ -318,6 +338,9 @@ impl Metal {
             msc: Msc::try_open_default().map(std::sync::Arc::new),
             residency_sets,
             pool_sets,
+            // Where the pools are in no queue's set, each command buffer asks for what it reaches:
+            // a blit cannot name its own ranges, and a fill into title memory must land.
+            pool_cb_sets: residency_sets && !pool_sets,
             pool_set: Default::default(),
             counts: Default::default(),
             archive: Default::default(),
@@ -365,6 +388,14 @@ impl Metal {
     /// Command buffers committed for submissions so far.
     pub fn command_buffers(&self) -> u64 {
         self.committed.get()
+    }
+
+    /// `VICTORY_METAL_RESIDENCY_SETS=cb` for tests: the pools' ranges in a set per command buffer
+    /// (and not in one joined to a queue).
+    pub fn with_pool_cb_sets(mut self, on: bool) -> Metal {
+        self.pool_cb_sets = on;
+        self.pool_sets = false;
+        self
     }
 
     /// All residency through `MTLResidencySet` (`true`: the heaps' sets and the pool's on the
@@ -615,7 +646,11 @@ impl ComputeBackend for Metal {
         // Kept whatever the tracing says: a slow command buffer's line and the ray-tracing
         // readback (`VICTORY_TRACE_RT`) name the pipeline they hold.
         let key = Retained::as_ptr(&p.0) as *const u8 as usize;
-        self.pipe_names.borrow_mut().insert(key, name.to_string());
+        let mut names = self.pipe_names.borrow_mut();
+        if names.len() >= PIPE_NAMES {
+            names.clear();
+        }
+        names.insert(key, name.to_string());
     }
 
     fn create_compute_pipeline(&self, dxil: &[u8]) -> Result<Pipeline, String> {
@@ -874,11 +909,15 @@ mod tests {
         const GIB: u64 = 1 << 30;
         let s = 7_600 << 20; // Series S, the default at 24 GiB and less
         let x = 13_500 << 20;
-        // 16, 18, 24 and 32 GiB: the device's working set covers the console's pools.
-        assert_eq!(residency_mode(None, true, 16 * GIB, 12 * GIB, s), (true, true));
-        assert_eq!(residency_mode(None, true, 18 * GIB, 13_636 << 20, s), (true, true));
-        assert_eq!(residency_mode(None, true, 24 * GIB, 18 * GIB, x), (true, true));
-        assert_eq!(residency_mode(None, true, 32 * GIB, 24 * GIB, x), (true, true));
+        // The heaps' sets wherever the working set covers the pools; the pools' own set (joined to
+        // every queue for the run) only where RAM holds them twice over -- 7.6 GiB of pools needs
+        // 23 GiB, 13.5 GiB needs 35. Where it is off the pools ride with each command buffer.
+        assert_eq!(residency_mode(None, true, 16 * GIB, 12 * GIB, s), (true, false));
+        assert_eq!(residency_mode(None, true, 18 * GIB, 13_636 << 20, s), (true, false));
+        assert_eq!(residency_mode(None, true, 24 * GIB, 18 * GIB, x), (true, false));
+        assert_eq!(residency_mode(None, true, 32 * GIB, 24 * GIB, x), (true, false));
+        assert_eq!(residency_mode(None, true, 24 * GIB, 18 * GIB, s), (true, true));
+        assert_eq!(residency_mode(None, true, 36 * GIB, 24 * GIB, x), (true, true));
         // A working set the pools do not fit: nothing pins.
         assert_eq!(residency_mode(None, true, 18 * GIB, 6 * GIB, s), (false, false));
         assert_eq!(residency_mode(None, true, 32 * GIB, 3 * GIB, x), (false, false));

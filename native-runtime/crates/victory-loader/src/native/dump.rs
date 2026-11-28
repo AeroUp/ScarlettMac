@@ -116,6 +116,13 @@ fn claim(taken: &std::sync::atomic::AtomicBool, code: u32, unhandled: bool) -> b
     wanted && !taken.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Writes the dump [`start`] schedules immediately, for a run's stall monitor
+/// (`VICTORY_STALL_SECONDS`, which calls it when no frame has been presented for a while): every
+/// title thread's host call and call chain, read from the calling thread.
+pub fn report_now() {
+    report();
+}
+
 fn report() {
     {
         tracing::warn!(
