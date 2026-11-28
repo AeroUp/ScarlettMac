@@ -160,6 +160,9 @@ pub struct Stats {
     pub detiles: u64,
     /// Textures whose layout the host cannot detile (counted once per content).
     pub undetilable: u64,
+    /// Submissions whose tables were read for the budget that also worked out the figures only
+    /// the budget's trace prints ([`Title::keep_named`]).
+    pub heap_only_figures: u64,
 }
 
 /// What a title pipeline object became on the host.
@@ -561,6 +564,7 @@ impl<B: PresentBackend> Title<B> {
         if self.held.is_empty() {
             return;
         }
+        let _timed = super::locktime::time(super::locktime::Part::Pump);
         let Title {
             host,
             queues,

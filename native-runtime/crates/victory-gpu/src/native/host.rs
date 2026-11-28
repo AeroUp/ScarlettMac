@@ -1606,6 +1606,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// Undecodable records and image or sampler views the host cannot make still leave the entry
     /// as it was: a buffer in a texture or sampler entry is not something to hand the GPU.
     pub fn mirror(&self, handle: u64) -> Result<bool, String> {
+        let _timed = super::locktime::time(super::locktime::Part::Mirror);
         let found = self.heaps.borrow().iter().find_map(|h| {
             let at = handle.checked_sub(h.start)?;
             let index = (at / Self::step(h.kind)) as usize;
@@ -2087,6 +2088,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// stores (the content draws' constant buffers, from frame ~700), which no device call reports,
     /// so their host entries stayed empty and the shaders read zeros.
     fn remirror_tables(&self, root: &[Option<Root<B>>], binding: Option<&Binding>) {
+        let _timed = super::locktime::time(super::locktime::Part::Remirror);
         let pool_gen = self.memory.generation();
         let res_gen = self.resources_epoch.get();
         for (slot, r) in root.iter().enumerate() {
@@ -2139,6 +2141,8 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 }
             }
             super::descriptor_trace::record(h.start, checked, changed);
+            super::locktime::count(super::locktime::Count::Checked, checked);
+            super::locktime::count(super::locktime::Count::Changed, changed);
         }
     }
 
@@ -2152,6 +2156,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
         binding: Option<&Binding>,
         heap: Option<&Rc<NativeHeap<B>>>,
     ) {
+        let _timed = super::locktime::time(super::locktime::Part::Typed);
         let any_typed = binding
             .is_none_or(|b| b.typed_buffers || b.ps.as_ref().is_some_and(|p| p.typed_buffers));
         if !any_typed {
@@ -2189,6 +2194,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 )
             {
                 self.typed_views.set(self.typed_views.get() + 1);
+                super::locktime::count(super::locktime::Count::TypedViews, 1);
             }
         };
         let mut indices = Vec::new();
@@ -2358,6 +2364,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
         {
             return Ok(t.clone());
         }
+        let _timed = super::locktime::time(super::locktime::Part::PageTable);
         let (generation, maps) = self.mapping_list();
         let mut c = self.contract.borrow_mut();
         let words = addr::build(&maps, &mut c.pairs, heap.count as u32);
@@ -3231,6 +3238,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 self.trace_root_span(root, pso.binding.as_ref(), groups);
                 self.remirror_tables(root, pso.binding.as_ref());
                 self.materialize_typed_buffers(root, pso.binding.as_ref(), heaps.0.as_ref());
+                let _args = super::locktime::time(super::locktime::Part::Args);
                 match &pso.binding {
                 Some(b) => {
                     self.translated_args(root, b, heaps.0.as_ref(), *threads, &mut p)?;
@@ -3280,6 +3288,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 self.materialize_typed_buffers(root, binding.as_deref(), heaps.0.as_ref());
                 self.trace_root_span(root, binding.as_deref(), &[0; 3]);
                 self.trace_content(root, vertex, call, binding.as_deref(), targets);
+                let args = super::locktime::time(super::locktime::Part::Args);
                 match binding {
                     Some(b) => {
                         self.translated_args(root, b, heaps.0.as_ref(), [u32::MAX; 3], &mut p)?;
@@ -3308,6 +3317,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                     }
                     None => self.root_args(root, &mut p)?,
                 }
+                drop(args);
                 // A view whose size the title gave no bytes for (`u32::MAX` above) resolves a
                 // byte, as before; a sized view resolves its whole range.
                 let len = |size: u32| match size {
@@ -3360,8 +3370,12 @@ impl<B: GraphicsBackend> NativeHost<B> {
         signals: &[(&B::Fence, u64)],
     ) -> Result<(), String> {
         let _counted = super::descriptor_trace::Submission;
+        let _timed = super::locktime::time(super::locktime::Part::Execute);
         self.submissions.set(self.submissions.get() + 1);
-        self.follow_title_pages();
+        {
+            let _timed = super::locktime::time(super::locktime::Part::Follow);
+            self.follow_title_pages();
+        }
         // A draw or dispatch that reads a root parameter the title never set is dropped by itself:
         // refusing the whole piece for it also dropped the piece's value writes, and a queue that
         // waits for one of those then holds everything behind it for good. (What the console
@@ -3439,7 +3453,10 @@ impl<B: GraphicsBackend> NativeHost<B> {
             }
             // Reported from this one preparation: preparing again for the trace would mirror tables
             // and write view pairs twice.
-            let prepared = self.prep(c);
+            let prepared = {
+                let _timed = super::locktime::time(super::locktime::Part::Prep);
+                self.prep(c)
+            };
             #[cfg(target_os = "macos")]
             if noted {
                 self.pass_at_submit(exec, &lists[li].notes, li, ci, c);
@@ -3540,9 +3557,11 @@ impl<B: GraphicsBackend> NativeHost<B> {
             buffers.extend(p.indirect.iter().map(|b| &*b.0));
             buffers.extend(p.count.iter().map(|b| &*b.0));
         }
+        let resident = super::locktime::time(super::locktime::Part::Resident);
         if let Err(e) = self.backend.make_resident(queue, &buffers) {
             tracing::warn!(error = %e, "pool buffers were not made resident");
         }
+        drop(resident);
 
         let compute: Vec<Vec<Dispatch<'_, B>>> = groups
             .iter()
@@ -3582,6 +3601,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
 
         // Copies between depth textures and their twins, before the passes that need them
         // ([`Self::twin_copies`]).
+        let twins = super::locktime::time(super::locktime::Part::Twins);
         #[allow(clippy::type_complexity)]
         let twin_copies: Vec<Vec<(Rc<DepthTwin<B>>, Rc<B::Texture>, bool)>> = groups
             .iter()
@@ -3606,6 +3626,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 None
             }
         };
+        drop(twins);
         for (n, g) in groups.iter().enumerate() {
             if !twin_copies[n].is_empty()
                 && let Some(stage) = &twin_stage
@@ -3806,6 +3827,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             });
         }
         self.passes.set(self.passes.get() + passes.len() as u64);
+        let metal = super::locktime::time(super::locktime::Part::Metal);
         let submitted = self.backend.submit_passes(
             queue,
             &PassSubmission {
@@ -3814,6 +3836,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 signals,
             },
         );
+        drop(metal);
         // A refused submission must not lose its bottom-of-pipe value writes: another queue waits
         // on one of them with no other way to go on, and a lost write is the title's
         // `Unsignaled CrossQueueBarrier`, which kills it (#80). Only the lost passes' fills are

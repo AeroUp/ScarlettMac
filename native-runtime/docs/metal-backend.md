@@ -817,3 +817,68 @@ Verified: unit tests with synthetic programs (`emit/wave32_tests.rs`); the lower
 `metal-shaderconverter` (no IRError 6). Not measured: the 528 corpus shaders (the cache holds translated DXIL,
 not console shaders; re-translate with the option to count). Not run on the GPU: the compute backend has no
 descriptor heaps or root signatures for translator output yet.
+
+## Where the host's lock goes (`VICTORY_TRACE_LOCK=1`, 29 November)
+
+Every title call that touches the native host's `Rc`s and Metal objects runs under one lock
+(`glue::with_title`). The frame line (`VICTORY_TRACE_FRAME=1`, `docs/native-host.md`, "Where a world
+frame's time goes") gives one figure for it, `lock_hold_ms`. A windowed Series S run of 29 November
+(texture hashing on xxh3, 36 GB Mac, the 512 MiB default texture budget) averaged these over its 291
+world frames (`gap_ms` > 200):
+
+| field | ms a world frame |
+|---|---|
+| `gap_ms` | 814 |
+| `lock_hold_ms` (38,900 `lock_calls`) | 703 |
+| `lock_wait_ms` (summed over the title's threads) | 3,226 |
+| `submit_ms` = `prepare_ms` (off the lock) + `apply_ms` + `encode_ms` | 563 = 51 + 278 + 234 |
+| of `apply_ms`: waiting / uploads (`tex_upload_ms`) / probes | 22 / 52 / 4.5 |
+| of `encode_ms`: waiting / Metal encoding (`cb_encode_ms`) | 2 / 47 |
+
+The existing fields therefore put about 200 ms of `apply_ms` in taking the lists, reading their tables for
+the texture budget (`keep_named`) and the budget's bookkeeping before the reads (`sync_jobs`); about 185 ms of
+`encode_ms` in preparing commands rather than encoding them; and about 215 ms outside `ExecuteCommandLists`
+altogether (38,000 recording calls, the 1 ms timer, queue and fence calls, descriptor writes). They cannot
+split it further, so `VICTORY_TRACE_LOCK=1` (with `VICTORY_TRACE_FRAME=1`) logs a `lock time frame=N ...` line
+after each frame line (`native/locktime.rs`):
+
+- `hold_<site>_ms` and `<site>_calls`, where the lock was taken: `record` (a list's recording calls), `take`,
+  `textures`, `upload` and `encode` (the submission's phases), `timer`, `queue` (queue and fence calls),
+  `resource` (heaps, descriptor writes, resources), `present`, `other`. These add up to `lock_hold_ms`.
+- `<part>_ms` and `<part>_n`, what ran under it, wherever it was taken: `pump`, `execute` (one piece
+  prepared and encoded) and its `follow`, `prep` (per command; contains `remirror`, `typed` and `args`),
+  `mirror` (one record decoded and written, from any caller), `page_table` (a page table built again),
+  `resident`, `twins` and `metal` (`submit_passes`); on the texture side `names` (`keep_named`), `heap_shown`
+  (its trace-only figures, below), `jobs` (`sync_jobs`, which contains `budget`); and the timer's `stuck`
+  check. Parts nest, so they do not add up.
+- `records_checked`, `records_changed` (table remirrors) and `typed_views` (Metal texture-buffer views made;
+  the run above made about 3,600 a world frame by the `typed_views` total of `native draws so far`).
+
+Off, each timer is one read of a cached switch.
+
+**What changed with it.** Over the texture budget every submission reads its tables (`Title::keep_named`).
+Each one also walked every copy the heaps that a heap-indexing shader binds show (9,300 to 10,200 in the run
+above, `texture budget: ... copies only heap entries a shader indexes show`) to work out figures only the
+budget's trace prints, once a second (`HEAP_ONLY`). They are now worked out only at the submission that trace
+logs at. `VICTORY_HEAP_ONLY_EVERY_SUBMISSION=1` restores the walk at every submission, to compare runs
+(`heap_shown_ms` in the lock line). Test: `texture_tests::the_heap_only_figures_are_not_worked_out_at_every_submission`.
+
+**Next, by what the run suggests (each to be confirmed by the lock line).**
+
+- The texture budget churns. At 512 MiB against about 1 GiB of copies a world uses, 150 to 1,079 copies a
+  second are given up and made again (`made again` in `host texture copies`), which is most of `tex_first`
+  (383 a world frame) and of the `textures` site. The Mac's suggested budget was 13,789 MiB. A run with
+  `VICTORY_METAL_TEXTURE_BUDGET_MB=3072` measures it without a code change: `hold_textures_ms`, `names_ms`,
+  `jobs_ms`, `budget_ms`, `tex_first`.
+- Typed buffer views. `materialize_typed_buffers` makes a new `MTLTexture` over a buffer for each record a
+  typed-buffer shader binds that changed, about 3,600 a world frame, though the title probably copies
+  the same views into its heaps each frame (not measured). A view kept per (buffer, offset, width, format, usage) in the backend, with
+  a bound, would make each once (`typed_ms`, `typed_views`). The bound matters: a view keeps its buffer, and
+  a title-page wrap kept alive by it is what raised Metal's count by gigabytes before (`forget_released`).
+- Encoding on several threads (#461) comes after the preparation: the Metal encoding is about 47 ms of the
+  232 ms held for `encode`, and the preparation reads and writes the host's `Rc`/`RefCell` state, so it
+  cannot leave the lock as it is.
+- Recording calls that set plain list state (topology, viewports, scissors, blend factor, stencil
+  reference, vertex and index buffer views, the pipeline) appear to clone or drop no `Rc` (not audited),
+  and could then take only the list's own lock. That shortens the title threads' waits more than the hold (`hold_record_ms`,
+  `record_calls`).

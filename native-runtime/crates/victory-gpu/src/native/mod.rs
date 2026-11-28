@@ -46,6 +46,8 @@ pub(crate) mod gpu_vertex_trace;
 pub(crate) mod hosttime;
 pub mod host;
 pub mod list;
+/// `VICTORY_TRACE_LOCK`: what the host's lock is held for, by call site and by part.
+pub(crate) mod locktime;
 pub mod memory;
 #[cfg(target_os = "macos")]
 pub(crate) mod rt;

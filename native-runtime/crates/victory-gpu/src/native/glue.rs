@@ -79,6 +79,8 @@ pub(crate) fn signal_event(event: usize) {
 struct Hold {
     guard: std::sync::MutexGuard<'static, Option<Shared>>,
     since: std::time::Instant,
+    /// Where it was taken (`VICTORY_TRACE_LOCK`).
+    site: super::locktime::Site,
 }
 
 impl std::ops::Deref for Hold {
@@ -96,7 +98,9 @@ impl std::ops::DerefMut for Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        super::hosttime::lock_held(self.since.elapsed());
+        let held = self.since.elapsed();
+        super::hosttime::lock_held(held);
+        super::locktime::held(self.site, held);
     }
 }
 
@@ -104,7 +108,7 @@ fn lock() -> Hold {
     let started = std::time::Instant::now();
     let guard = TITLE.lock().unwrap_or_else(|e| e.into_inner());
     super::hosttime::lock_waited(started.elapsed());
-    Hold { guard, since: std::time::Instant::now() }
+    Hold { guard, since: std::time::Instant::now(), site: super::locktime::site() }
 }
 
 /// Set once the host is on its way out: it takes no more GPU work, from the title's threads or
@@ -191,6 +195,7 @@ fn start_timer() {
     let _ = std::thread::Builder::new()
         .name("victory native host".into())
         .spawn(|| {
+            let _site = super::locktime::at(super::locktime::Site::Timer);
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(1));
                 let mut guard = lock();
@@ -218,7 +223,10 @@ fn refresh(t: &mut MetalTitle) {
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if last.is_none_or(|l| l.elapsed().as_secs() >= 5) {
-            let stuck = t.stuck(std::time::Duration::from_secs(2));
+            let stuck = {
+                let _timed = super::locktime::time(super::locktime::Part::Stuck);
+                t.stuck(std::time::Duration::from_secs(2))
+            };
             if !stuck.is_empty() {
                 *last = Some(std::time::Instant::now());
                 tracing::warn!("work held for a wait that does not hold: {stuck:?}");
@@ -259,6 +267,7 @@ pub(crate) fn with_list<R>(
     if this.is_null() {
         return None;
     }
+    let _site = super::locktime::at(super::locktime::Site::Record);
     with_title(|t| {
         let list = crate::list::native(this);
         let mut list = list.lock().unwrap_or_else(|e| e.into_inner());
@@ -303,6 +312,7 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
     // frame's `malloc` time on the render thread, under this lock.
     let mut segments = Vec::new();
     {
+        let _site = super::locktime::at(super::locktime::Site::Take);
         let (taken, took, waited) = timed_body(|t| {
             let mut out = Vec::new();
             for &l in lists.iter().filter(|l| !l.is_null()) {
@@ -318,6 +328,7 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
     }
     let mut jobs = Vec::new();
     if unlocked {
+        let _site = super::locktime::at(super::locktime::Site::Textures);
         // What the frame has left for textures ([`textures::FRAME_TEXTURE_WORK`]): once spent,
         // this submission's textures are left for the next frame rather than holding this one
         // past the title's watchdog.
@@ -358,7 +369,10 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
                 with_title(|t| t.spent_texture_work(read.elapsed()));
                 super::hosttime::enter(super::hosttime::Phase::Apply);
                 let started = std::time::Instant::now();
-                with_title(|t| t.sync_apply(prepared));
+                {
+                    let _site = super::locktime::at(super::locktime::Site::Upload);
+                    with_title(|t| t.sync_apply(prepared));
+                }
                 apply += started.elapsed();
                 apply_wait += super::hosttime::last_wait();
                 with_title(|t| t.spent_texture_work(started.elapsed()));
@@ -371,6 +385,7 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
     }
     super::hosttime::enter(super::hosttime::Phase::Encode);
     let encoding = std::time::Instant::now();
+    let site = super::locktime::at(super::locktime::Site::Encode);
     with_title(|t| {
         // What the GPU drew, cleared or wrote through views is no longer filled from title
         // memory, which the title changes under its render targets (noise uploaded over them).
@@ -394,6 +409,7 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
             victory_platform::watch::watch(&t.host.heap_ranges());
         }
     });
+    drop(site);
     super::hosttime::submitted(super::hosttime::Submit {
         order_wait,
         prepare,
@@ -407,6 +423,7 @@ pub(crate) fn submit(queue: This, lists: &[This]) {
 }
 
 pub(crate) fn queue_signal(queue: This, fence: This, value: u64) {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     let initial = crate::fence::initial(fence);
     with_title(|t| {
         let _ = t.ensure_queue(queue as usize);
@@ -415,6 +432,7 @@ pub(crate) fn queue_signal(queue: This, fence: This, value: u64) {
 }
 
 pub(crate) fn queue_wait(queue: This, fence: This, value: u64) {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     let initial = crate::fence::initial(fence);
     with_title(|t| {
         let _ = t.ensure_queue(queue as usize);
@@ -423,17 +441,20 @@ pub(crate) fn queue_wait(queue: This, fence: This, value: u64) {
 }
 
 pub(crate) fn queue_released(queue: This) {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     with_title(|t| t.forget_queue(queue as usize));
 }
 
 /// `ID3D12Fence::Signal`.
 pub(crate) fn fence_signal(fence: This, value: u64) {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     let initial = crate::fence::initial(fence);
     with_title(|t| t.signal_cpu(fence as usize, initial, value));
 }
 
 /// The value fence `fence` has completed, queues pumped first.
 pub(crate) fn fence_poll(fence: This) -> u64 {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     let initial = crate::fence::initial(fence);
     with_title(|t| {
         t.pump();
@@ -444,12 +465,14 @@ pub(crate) fn fence_poll(fence: This) -> u64 {
 
 /// `GetCompletedValue` of a fence that has no GPU behind it yet: nothing to ask.
 pub(crate) fn fence_released(fence: This) {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     with_title(|t| t.forget_fence(fence as usize));
 }
 
 /// Blocks until fence `fence` reaches `value` (the title's `SetEventOnCompletion` with no event):
 /// held work keeps moving while it waits. False after `timeout`.
 pub(crate) fn fence_wait(fence: This, value: u64, timeout: std::time::Duration) -> bool {
+    let _site = super::locktime::at(super::locktime::Site::Queue);
     let initial = crate::fence::initial(fence);
     let start = std::time::Instant::now();
     loop {
@@ -1056,6 +1079,11 @@ fn frame_line() {
         queues = %queues,
         "frame time"
     );
+    // `VICTORY_TRACE_LOCK=1`: `lock_hold_ms` by where the lock was taken and by what ran under it.
+    let lock = super::locktime::take_line();
+    if !lock.is_empty() {
+        tracing::info!("lock time frame={frame} {lock}");
+    }
     if !w.passes.is_empty() {
         tracing::info!(frame, "frame passes by GPU time: {}", victory_metal::frametime::top_passes(&w, 10));
     }
@@ -1082,6 +1110,7 @@ fn frame_line() {
 /// `PresentX` on title queue `queue`: title textures `planes` over the layer, the first under the
 /// others (`Title::present`). The traces name the first.
 pub(crate) fn present(queue: This, planes: &[This]) {
+    let _site = super::locktime::at(super::locktime::Site::Present);
     let Some(&resource) = planes.first() else { return };
     let present_started = std::time::Instant::now();
     if present_every().is_some() {
@@ -1202,6 +1231,7 @@ pub fn last_frame() -> Option<(usize, usize, Vec<u8>)> {
 /// A buffer resource object `res` of `len` bytes at title address `addr`.
 /// `own`: its memory is the host's (committed, or in a heap), not title memory a pool holds.
 pub(crate) fn buffer_created(res: This, addr: u64, len: u64, own: bool) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     with_title(|t| match own {
         true => t.host.register_own_buffer(res as usize, addr, len),
         false => t.host.register_buffer(res as usize, addr, len),
@@ -1212,6 +1242,7 @@ pub(crate) fn buffer_created(res: This, addr: u64, len: u64, own: bool) {
 /// title makes thousands of variants (device slot 0x1b8) a minute and a new one often gets a freed
 /// one's address (which drew text with the old variant's blend state: glyphs as boxes).
 pub(crate) fn pipeline_released(pipeline: This) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     let key = pipeline as usize;
     with_title(|t| {
         t.pipelines.retain(|(k, _), _| *k != key);
@@ -1222,6 +1253,7 @@ pub(crate) fn pipeline_released(pipeline: This) {
 }
 
 pub(crate) fn resource_released(res: This) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     with_title(|t| {
         t.host.release_resource(res as usize);
         t.texture_released(res as usize);
@@ -1231,6 +1263,7 @@ pub(crate) fn resource_released(res: This) {
 /// A title texture object: its host texture is made, and filled from title memory when work is
 /// next submitted.
 pub(crate) fn texture_created(res: This) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     if let Some(info) = crate::resource::texture_info(res) {
         with_title(|t| t.texture_created(res as usize, info));
     }
@@ -1426,6 +1459,7 @@ fn trace_clear_skipped(why: &str) {
 static HEAPS: Mutex<Vec<(u64, u64, bool, usize)>> = Mutex::new(Vec::new());
 
 pub(crate) fn heap_created(start: u64, samplers: bool, count: usize) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     let step = if samplers { 16 } else { 32 };
     HEAPS
         .lock()
@@ -1434,6 +1468,7 @@ pub(crate) fn heap_created(start: u64, samplers: bool, count: usize) {
 }
 
 pub(crate) fn heap_released(start: u64) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     HEAPS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1475,6 +1510,7 @@ fn heap_of(t: &mut MetalTitle, handle: u64) -> Option<(Rc<super::list::NativeHea
 
 /// The title wrote a view at `handle` (the call `descriptor::mirror` is on Windows).
 pub(crate) fn mirror(handle: u64) {
+    let _site = super::locktime::at(super::locktime::Site::Resource);
     with_title(|t| {
         match crate::descriptor::view(handle) {
             // A texture the title placed in its own memory has no resource object: the host
