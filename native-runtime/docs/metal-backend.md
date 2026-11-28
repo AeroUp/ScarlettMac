@@ -159,6 +159,16 @@ is tested; MSC takes it as it is. Prototype results:
   delta.
 - Later, B can replace MSC for the hot or unsupported pieces (page table loads, 64-bit atomics) without
   changing the host side.
+- MSC does not validate its input. A function with a phi lacking an incoming value for one of its
+  block's predecessors makes it segfault in `SimplifyCFGOpt::run`, killing the process (the game,
+  when it converts at pipeline creation), instead of returning an error. The lowering could leave
+  such a phi (a lane mask join's number, cached before an edge failed; docs/native-host.md), so
+  `Lower::unfilled_phis` (`Module::phi_without_its_edges`) now refuses any function that writes
+  one. On the kept store of 28 November (31,597 compute containers, main `49a1559`) it refuses 6
+  programs main translated, nothing else changes: `4791a0a64d9e325d`, `9a95132bed6c6513`,
+  `b916af43ceba0a29` and `dec5136b141ac4b2` segfault `metal-shaderconverter` from main's DXIL;
+  `4e2be81db49aece1` and `c22779675a2f025d` convert, but from a phi with no value on an edge.
+  Test: `store_tests::a_join_whose_incoming_values_were_not_all_made_is_refused`.
 
 ### Obtaining MSC
 

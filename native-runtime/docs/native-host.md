@@ -792,6 +792,14 @@ and the lane's own path differ. The "a lane mask holding lanes elsewhere read as
 input" refusals (26 in that log) were joins whose edges are masks themselves and have no writing
 instruction, which this numbers.
 
+The number phi is cached (`ballots`) before its edges are numbered, so when an edge fails the empty
+phi stays cached and a later read of the same join can use it. The Metal Shader Converter segfaults
+(SimplifyCFG) on such DXIL, so `Lower::unfilled_phis` refuses a function with a written phi lacking
+an incoming value per edge ("a join whose incoming values were not all made"): 6 kept compute
+programs, 4 of which crashed it (docs/metal-backend.md, "Shader path"). Tests:
+`mask_tests::a_mask_joins_number_left_unmade_is_not_read_from_the_cache`,
+`bitcode::tests::a_written_phi_without_an_entry_per_edge_is_found`.
+
 A 64-bit scalar instruction in a 32-lane program works on its register pair's two dwords on their
 own (`Lower::mask_pair32_number`): the console compiler swaps a mask's register with a value's
 pair through three `s_xor_b64`, each dword independently. Shifts and bit fields (which carry
