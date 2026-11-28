@@ -2699,9 +2699,15 @@ an earlier wave left; the compiler reads a spill lane only on paths that wrote i
 should depend on the value. Only a join's edge gets this: a `v_readlane` straight of an unwritten
 VGPR, or of a lane another instruction than `v_writelane_b32` wrote on some edge, is unchanged
 (refused, or a cross-lane read of the whole VGPR). A read of the spilled descriptor's lane is
-refused for the descriptor, as before. Measured on the kept store (31,575 containers): 94 more
-translate, 0 regressions, 0 output changes; the counts by reason are in docs/metal-backend.md
-("The largest class is not a descriptor"). Tests:
+refused for the descriptor, as before. Measured on the kept store (31,575 containers): 86 more
+translate; the counts by reason are in docs/metal-backend.md ("The largest class is not a
+descriptor"). A first version translated 94, and the Metal Shader Converter crashed
+(`SimplifyCFG`) on 7 of them in a game run: a mask's number at a join, made as a phi before its
+edges and then failed, stayed cached and a later read used the empty phi. A failed join now
+leaves the cache, and the lowering refuses any function with a phi lacking an incoming value per
+edge (`Lower::unfilled_phis`). That also takes 6 programs main translated into such functions
+(4 crash the converter offline) back to a refusal, and changes the output of 61 more that read
+the empty phi while being lowered; each output checked converts. Tests:
 `gfx_refusal_tests::a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read` and
 `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join`.
 

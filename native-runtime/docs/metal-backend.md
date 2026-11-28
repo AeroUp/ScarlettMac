@@ -686,26 +686,42 @@ and raises fence values.
   lanes, or why the host has none), `Lower::spill_slot` takes a lane's value from that, a phi of
   them at joins, and a join's edge where the VGPR is not written yet gives zero, as a VGPR nothing
   wrote reads (guess, docs/native-host.md). Reading the spilled descriptor's own lane is still
-  refused for the base address. On the kept store of 28 November (31,575 containers) 94 more
-  translate and none regress or change output:
+  refused for the base address. On the kept store of 28 November (31,575 containers) 86 more
+  translate, and 61 change output:
 
   | reason | before | after |
   |---|---|---|
-  | an image's base address (dword 0) | 361 | 228 |
-  | a lane mask holding lanes elsewhere read as data: not written by a scalar ALU instruction | 144 | 121 |
-  | a lane mask read as data | 358 | 355 |
-  | a lane-mask join of an untracked mask: a value the translation could not make | 101 | 162 |
-  | a register joining a lane mask and data, read as data | 42 | 45 |
-  | a descriptor read only as data | 68 | 69 |
+  | an image's base address (dword 0) | 361 | 219 |
+  | a lane mask holding lanes elsewhere read as data: not written by a scalar ALU instruction | 144 | 128 |
+  | a lane mask read as data | 358 | 349 |
+  | a lane-mask join of an untracked mask: a value the translation could not make | 101 | 170 |
+  | a register joining a lane mask and data, read as data | 42 | 58 |
+  | a descriptor read only as data | 68 | 70 |
 
-  Of the 133 that left the base-address reason, 73 translate and 59 moved to the lane-mask join
-  "a value the translation could not make": an SGPR that holds a mask on one edge and descriptor
-  data on another (27 of them a descriptor read only as data, 13 an image dimension, 6 the base
-  address again), not a spill lane. That join, not the spill, is the next refusal of this family;
-  the 70 "data, on the host's lanes" joins are unchanged. Tests:
+  The first version of this change translated 94, and a game run crashed in the converter
+  (`SimplifyCFG`, `EXC_BAD_ACCESS`) on 7 of them: their functions had a phi with no incoming
+  value. `Lower::mask_phi_number` puts a join's phi in the mask-number cache (`ballots`) before
+  filling it, for a back edge that reads it; when an edge has no number it fails, and the phi
+  stayed in the cache, so a later read of the same mask got the empty phi. Main has the same
+  bug: 6 programs it translates have such a phi (4 of them crash the converter offline), and
+  54 more read the empty phi while being lowered (counted with a local diagnostic). A
+  failed join now leaves the cache, so later reads fail as the first did, and
+  `Lower::unfilled_phis` refuses any function whose written phis lack an incoming value per
+  edge ("a join whose incoming values were not all made"; no program of the store reaches it).
+  So the 6 are refused now ("a lane-mask join of an untracked mask: a value the translation
+  could not make"), the 61 whose output changed took the empty phi out of their lowering (all
+  pass a structural check of phis, dominance and written operands, and convert), and the 8
+  of the 94 left are refused for the join. Of the 142 that left the base-address reason, 70
+  translate and 58 moved to that join: an SGPR that holds a mask on one edge and descriptor
+  data on another (a descriptor read only as data, an image dimension, the base address
+  again), not a spill lane. That join, not the spill, is the next refusal of this family; the
+  70 "data, on the host's lanes" joins are unchanged. Tests:
   `gfx_refusal_tests::a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read`,
-  `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join` (both refused before), and
-  `store_tests::a_descriptor_address_spilled_beside_a_restored_exec_translates`.
+  `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join` (both refused before),
+  `bitcode::tests::a_written_phi_without_an_entry_per_edge_is_found`,
+  `store_tests::a_descriptor_address_spilled_beside_a_restored_exec_translates` and
+  `store_tests::a_mask_joins_number_that_failed_is_not_read_again` (translated with the empty
+  phi before).
 - **Title memory at computed addresses: the pool-offset contract** (`native/addr.rs`, compute shaders). A
   shader that reads or writes through a pointer it computes (`global_*`, `s_load` from a loaded address,
   atomics, BVH nodes) finds the memory through the translator's page table (`emit` "Title memory"): per

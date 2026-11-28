@@ -2020,6 +2020,7 @@ impl<'a> Lower<'a> {
             self.lower_blocks(&order, self.s.entry)?;
             self.fill_phis()?;
         }
+        self.unfilled_phis()?;
         let user_data = self.user_reads.values().copied().collect();
         self.s.samplers = self.samplers.len() as u32;
         let root_cbvs = self.s.root_cbvs.iter().map(|r| r.0).collect();
@@ -2668,6 +2669,17 @@ impl<'a> Lower<'a> {
             _ => return Err(NOT),
         };
         Ok(self.s.m.i32(c))
+    }
+
+    /// Refuses a function with a join whose incoming values are not one per edge into its
+    /// block: a phi made for a value whose making failed later (a mask's number at a join),
+    /// then read through a cache. The Metal Shader Converter crashes on such a function (in
+    /// SimplifyCFG) rather than reporting it.
+    fn unfilled_phis(&self) -> Result<(), Stop> {
+        if self.s.m.phi_without_its_edges() {
+            return Err(unsupported(0, "a join whose incoming values were not all made"));
+        }
+        Ok(())
     }
 
     /// The DXIL form of an IR value.
@@ -3509,7 +3521,13 @@ impl<'a> Lower<'a> {
                     return Err("a register joining a lane mask and data, read as data");
                 }
             }
-            return self.mask_phi_number(lo, b, i);
+            let number = self.mask_phi_number(lo, b, i);
+            if number.is_err() {
+                // The join's phi went in first (for a back edge that reads it) and is not
+                // filled: a later read must not find it ([`Lower::unfilled_phis`]).
+                self.ballots.remove(&lo);
+            }
+            return number;
         }
         let &b = self.def_block.get(&lo).ok_or(INPUT)?;
         let inst = p.blocks[b]

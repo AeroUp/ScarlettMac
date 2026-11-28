@@ -93,3 +93,31 @@ fn a_descriptor_address_spilled_beside_a_restored_exec_translates() {
         &["bf865cf731f6c8ff", "0318b6d2a9d5c44a", "ff6136ac963ef248"],
     );
 }
+
+/// Programs whose lowering made a lane mask's number at a join as a phi, failed to fill it
+/// (an edge's mask or data has no number), and then found the empty phi through the cache on a
+/// later read: they translated into a function the Metal Shader Converter crashed on, in a run
+/// and offline. Now the later reads fail as the first did, so these are refused for their own
+/// reasons (none for "a join whose incoming values were not all made", the guard behind it).
+/// When those joins are lowered, this becomes a check that they translate.
+#[test]
+fn a_mask_joins_number_that_failed_is_not_read_again() {
+    for hash in [
+        "4997b6b9c6de757e",
+        "56ee7eb1a3f7f4d5",
+        "7d6341512e0fdfac",
+        "91c3a450b2bf40e2",
+        "a13a2417f299bb5d",
+        "a3bfb55326489164",
+        "ef2257f9d25f8191",
+        "a75d0c3cc594f093",
+    ] {
+        let Some(shader) = translate(hash) else {
+            return;
+        };
+        match shader {
+            Ok(()) => panic!("{hash}: translated with a join's number left unmade"),
+            Err(e) => assert!(!e.contains("not all made"), "{hash}: {e}"),
+        }
+    }
+}
