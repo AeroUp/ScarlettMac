@@ -26,6 +26,8 @@ mod mesh_tests;
 mod scaled_vertex_tests;
 #[path = "shader_tests.rs"]
 mod shader_tests;
+#[path = "spill_lane_tests.rs"]
+mod spill_lane_tests;
 #[path = "split_wave_tests.rs"]
 mod split_wave_tests;
 #[path = "stale_tests.rs"]

@@ -681,12 +681,41 @@ and raises fence values.
   all are 113-120 KB compute programs, and the dword 0 they "read" is only *spilled*: for
   `bf865cf731f6c8ff` the load at 0x8150 is read as data, its dword 0 (s12) is written to VGPR lane 12
   (`v_writelane_b32 v141, s12, 12`), and the refusal surfaces at an `s_cbranch_execz` whose EXEC comes
-  from a `v_readlane` of lane 0. Serving it a value moves 98 of them to a buffer's dword 1 (fixed
-  above) and 88 then to the lane-mask family: the per-lane spill phi has an edge with no write ("a VGPR
-  lane no SGPR spill fills"). The fix is the spill model, not the descriptor: a `v_writelane` whose
-  scalar the host cannot make poisons its whole VGPR value, so a `v_readlane` of a *different* lane,
-  whose value is known, refuses too. Per-lane values through the register's phis would let the
-  descriptor dword be spilt and never read.
+  from a `v_readlane` of lane 0. A `v_writelane` whose scalar the host cannot make poisoned its whole
+  VGPR value, and the read of lane 0 fell back to reading that value: lane 0 holds an EXEC (a lane
+  mask), and its VGPR goes through joins where different masks were spilled, some with an edge where
+  nothing wrote the VGPR yet. Each `v_writelane_b32` of a constant lane now keeps what it put in its
+  lane (`Lower::lane_writes`), and `Lower::spill_slot` follows a lane through joins. A first version
+  took each lane's own path through every join (an unwritten edge as zero) and translated 86 more
+  programs, 29 of them bound in the world; a game run with them stalled a compute command buffer
+  (in flight > 6.8 s) about 90 s into the world. On Metal (`victory-gpu` `spill_lane_tests`), an
+  EXEC spilled inside an EXEC branch and restored after it left the lanes that skipped the branch
+  off (they stored nothing), where on GFX10 the wave runs the branch and every lane reads that EXEC;
+  so did a mask with bits of inactive lanes (`s_not_b32` of EXEC) spilled there. Most of the title's
+  29 have such joins (up to 8 each, often one with an unwritten edge). Now a join that lanes enter
+  through a branch on their own bits must bring one spill on every forward edge, unless every
+  spill in its web is a plain scalar on a written edge (what the lowering followed before, mesh
+  programs among them: unchanged) (`Lower::spill_join_agrees`). Shapes the Metal tests run
+  correctly: a counter spilled in a uniform loop bounding it, an EXEC restored at a loop's head
+  each pass, a break mask of a divergent loop, nested saved EXECs, a respill to another VGPR, a
+  wave64 pair over both halves.
+
+  The first version also crashed the Metal Shader Converter (`SimplifyCFG`) on 7 programs: a
+  mask's number at a join (`Lower::mask_phi_number`) is cached as a phi before its edges, and a
+  failed join's empty phi stayed cached for later reads. Main has 6 programs whose output keeps such
+  a phi (4 crash the converter offline). Taking the failed phi out of the cache changed the output
+  of 61 programs main translates (fewer ballots, selects and ands live; 29 of them bound in the
+  world) with no proof they compute the same, so that is not done: `Lower::unfilled_phis` refuses a
+  function whose written phis lack an incoming value per edge ("a join whose incoming values were not
+  all made"), and the 61 keep main's output.
+
+  Kept store, 29 November (31,597 containers), against main: 6 newly translated (each converts; one,
+  `1cb0acd50c525aa4`, bound in the world), the 6 with an empty phi refused, no output changed. Tests:
+  `gfx_refusal_tests::a_descriptor_dword_spilled_in_a_loop_beside_a_known_lane_is_not_read`,
+  `a_descriptor_dword_spilled_on_one_arm_is_not_read_after_the_join`,
+  `a_descriptor_dword_spilled_on_an_arm_some_lanes_skip_is_not_read_after_the_join`,
+  `bitcode::tests::a_written_phi_without_an_entry_per_edge_is_found`, `store_tests` (with
+  `VICTORY_SHADER_STORE`), `victory-gpu` `spill_lane_tests` (Metal).
 - **Title memory at computed addresses: the pool-offset contract** (`native/addr.rs`, compute shaders). A
   shader that reads or writes through a pointer it computes (`global_*`, `s_load` from a loaded address,
   atomics, BVH nodes) finds the memory through the translator's page table (`emit` "Title memory"): per

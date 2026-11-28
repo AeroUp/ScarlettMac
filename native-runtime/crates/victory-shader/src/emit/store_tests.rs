@@ -93,3 +93,44 @@ fn packed_unsigned_16_bit_conversions_translate() {
         ],
     );
 }
+
+/// 113-120 KB compute programs that spill an image descriptor's base address to a VGPR lane
+/// beside an EXEC they read back from lane 0 of the same VGPR. Each lane's own value of a spill
+/// (`lower::Lower::spill_slot`, `lane_writes`) translated them, but their lane 0 reaches the
+/// read through joins that lanes skipping a branch enter with another spill, or none, than the
+/// branch made (`Lower::spill_join_agrees`): on the console those lanes read what the wave
+/// wrote in the branch. Refused again; an EXEC so restored stored nothing for such lanes on
+/// Metal (`victory-gpu` `spill_lane_tests`).
+#[test]
+fn a_descriptor_address_spilled_beside_an_exec_restored_after_a_skipped_branch_is_refused() {
+    for hash in ["bf865cf731f6c8ff", "0318b6d2a9d5c44a", "ff6136ac963ef248"] {
+        let Some(shader) = translate(hash) else {
+            return;
+        };
+        assert!(shader.is_err(), "{hash}: translated");
+    }
+}
+
+/// Programs whose lowering made a lane mask's number at a join as a phi, failed to fill it
+/// (an edge's mask or data has no number), and then read the empty phi through the cache: they
+/// translated into a function the Metal Shader Converter crashed on, in a run and offline. They
+/// are refused ("a join whose incoming values were not all made", `Lower::unfilled_phis`).
+/// Programs that read such a phi only into code that is not written keep their translation.
+#[test]
+fn a_mask_joins_number_left_unmade_is_refused() {
+    for hash in [
+        "4997b6b9c6de757e",
+        "56ee7eb1a3f7f4d5",
+        "7d6341512e0fdfac",
+        "91c3a450b2bf40e2",
+        "a13a2417f299bb5d",
+        "a3bfb55326489164",
+        "ef2257f9d25f8191",
+        "a75d0c3cc594f093",
+    ] {
+        let Some(shader) = translate(hash) else {
+            return;
+        };
+        assert!(shader.is_err(), "{hash}: translated with a join's number left unmade");
+    }
+}

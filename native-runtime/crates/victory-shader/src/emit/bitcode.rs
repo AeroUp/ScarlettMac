@@ -822,6 +822,36 @@ impl Module {
         plan
     }
 
+    /// Whether a phi the module writes lacks an incoming value for an edge into its block, or
+    /// has one for a block that is not a predecessor (it was made but never filled, say).
+    pub(super) fn phi_without_its_edges(&self) -> bool {
+        let plan = self.plan();
+        let mut preds = vec![Vec::new(); self.blocks.len()];
+        for &b in &plan.layout {
+            for &s in successors(self.term(b)).iter() {
+                preds[plan.to(s)].push(b);
+            }
+        }
+        plan.layout.iter().any(|&x| {
+            let want = &mut preds[x];
+            want.sort_unstable();
+            want.dedup();
+            self.blocks[x].phis.iter().filter(|&&i| plan.live[i as usize]).any(|&i| {
+                let Op::Phi(incoming) = &self.insts[i as usize].op else {
+                    return false;
+                };
+                let mut from: Vec<usize> = incoming
+                    .iter()
+                    .filter(|&&(_, b)| plan.edge(self, b, x))
+                    .map(|&(_, b)| plan.src(b))
+                    .collect();
+                from.sort_unstable();
+                from.dedup();
+                from != *want
+            })
+        })
+    }
+
     #[allow(dead_code, reason = "standalone serialization for callers without an emission plan")]
     pub fn write(&self) -> Vec<u8> {
         self.write_with_plan(self.plan())
@@ -1532,6 +1562,38 @@ mod tests {
         m.function("main", main_ty, None, true);
         let blocks = (0..n).map(|_| m.new_block()).collect();
         (m, blocks, sink)
+    }
+
+    /// A written phi needs one incoming value per edge into its block: one made but never
+    /// filled (the Metal Shader Converter crashed in SimplifyCFG on such a function), or one
+    /// missing an edge, is found; a filled one, an unfilled one nothing reads, and an entry
+    /// from a branch's side that is not written are not.
+    #[test]
+    fn a_written_phi_without_an_entry_per_edge_is_found() {
+        let build = |fill: Option<usize>, read: bool| {
+            let (mut m, b, sink) = module(4);
+            let [entry, p, q, join] = b[..] else { unreachable!() };
+            let i32t = m.int(32);
+            let (one, two) = (m.i32(1), m.i32(2));
+            let x = m.cmp(entry, pred::EQ, one, two);
+            m.terminate(entry, Term::CondBr(x, p, q));
+            m.terminate(p, Term::Br(join));
+            m.terminate(q, Term::Br(join));
+            let phi = m.phi(join, i32t);
+            if let Some(n) = fill {
+                let all = [(one, p), (two, q)];
+                m.set_phi(phi, all[..n].to_vec());
+            }
+            if read {
+                let _ = m.call(join, sink, vec![phi]);
+            }
+            m.terminate(join, Term::Ret);
+            m.phi_without_its_edges()
+        };
+        assert!(build(None, true), "never filled");
+        assert!(build(Some(1), true), "an edge missing");
+        assert!(!build(Some(2), true), "filled");
+        assert!(!build(None, false), "not written");
     }
 
     /// A branch on a constant takes its one edge: what only the other side
