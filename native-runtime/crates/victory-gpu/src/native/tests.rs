@@ -286,7 +286,9 @@ fn a_buffer_view_across_title_pages_out_of_pool_order_reads_the_title_mapping() 
 /// those title addresses, or unmaps them, the GPU still reads the old pages through it (no fault,
 /// no zeros; seen on an M5 Pro, macOS 27). The host mirrors such a heap entry again before the
 /// next work it submits (`NativeHost::follow_title_pages`), so the view reads the new page, and
-/// then zeros (the null view) once part of its range is unmapped.
+/// once part of its range is unmapped, its still-mapped page and zeros in the hole: D3D12 tier 2's
+/// shape for a reserved resource (`NativeHost::title_holes`, since the fcdd469e sync), not the
+/// null view, and never the old page.
 #[test]
 fn a_wrapped_view_follows_title_pages_remapped_or_unmapped_under_it() {
     let Some(h) = host() else { return };
@@ -340,7 +342,9 @@ fn a_wrapped_view_follows_title_pages_remapped_or_unmapped_under_it() {
     title.remap(&h, &info, &pool, 1, 4 * page, page);
     assert_eq!(pass(), expect(&|i| i + 68), "the view still read the old pool page");
     title.unmap(&h, 1, page);
-    assert_eq!(pass(), vec![1; 64], "a view with an unmapped page is the null view");
+    // Title page 0 is still mapped and read as it is; the unmapped page 1 reads zeros (0 * 3 + 1),
+    // not the old pool page's words (which would give (i + 68) * 3 + 1).
+    assert_eq!(pass(), expect(&|_| 0), "a view with an unmapped page reads zeros in the hole only");
     // A null view (address 0) written over a followed entry is not followed any more.
     assert!(heap.title_views.borrow().contains_key(&0));
     crate::descriptor::create_cbv(std::ptr::null_mut(), &[0, 0, 256, 0], start);
