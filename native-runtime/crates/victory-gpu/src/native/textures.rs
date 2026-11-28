@@ -4005,6 +4005,18 @@ pub enum Decoded {
 /// must stay) and those that only a heap entry a shader indexes shows (possible reads, not names:
 /// the budget may give them up).
 static HEAP_ONLY: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+/// Whether a submission's [`Title::keep_named`] works out the [`HEAP_ONLY`] figures: when the
+/// budget's trace logs at it (`trace_due`), or at every submission with
+/// `VICTORY_HEAP_ONLY_EVERY_SUBMISSION=1` (what it did before, kept to compare runs).
+pub(super) fn heap_only_figures_due(trace_due: bool, every_submission: bool) -> bool {
+    trace_due || every_submission
+}
+
+/// `VICTORY_HEAP_ONLY_EVERY_SUBMISSION=1`: [`HEAP_ONLY`] at every submission, as before.
+fn heap_only_every_submission() -> bool {
+    env_set!("VICTORY_HEAP_ONLY_EVERY_SUBMISSION")
+}
+
 /// For the trace: copies given up though a heap entry still showed them (a possible read, not a
 /// name: the budget prefers the memory), and their bytes.
 static SHOWN_TRACE: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
@@ -4257,26 +4269,31 @@ impl<B: PresentBackend> Title<B> {
         // clear its entries, which a shader that indexes one of them samples as transparent black,
         // and a record a table names later makes it again as for any given-up copy.
         let named = self.host.resources_named(all.iter().copied());
-        // For the trace: what only a heap a shader indexes shows, which the budget may take.
-        let heap_shown = super::locktime::time(super::locktime::Part::HeapShown);
-        let shown = self.host.shown_by_indexed_heaps(all.iter().copied());
-        let only_heap = shown.iter().filter(|k| !named.contains(k));
-        let bytes: u64 = only_heap
-            .clone()
-            .filter_map(|k| self.textures.get(&self.owner_of(*k)))
-            .map(|t| t.info.size as u64)
-            .sum();
-        let count = only_heap.count() as u64;
-        let named_bytes: u64 = named
-            .iter()
-            .filter_map(|k| self.textures.get(&self.owner_of(*k)))
-            .map(|t| t.info.size as u64)
-            .sum();
-        HEAP_ONLY[0].store(bytes, std::sync::atomic::Ordering::Relaxed);
-        HEAP_ONLY[1].store(count, std::sync::atomic::Ordering::Relaxed);
-        HEAP_ONLY[2].store(named_bytes, std::sync::atomic::Ordering::Relaxed);
-        HEAP_ONLY[3].store(named.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        drop(heap_shown);
+        // For the trace: what only a heap a shader indexes shows, which the budget may take. Only
+        // its line prints these, once a second, so they are worked out at the submission it logs
+        // at: at every submission they walked every copy the indexed heaps show (some 10,000 in
+        // a world frame of ~23 submissions) under the host's lock, for figures nothing read.
+        if heap_only_figures_due(self.budget.trace_due(), heap_only_every_submission()) {
+            let _timed = super::locktime::time(super::locktime::Part::HeapShown);
+            self.stats.heap_only_figures += 1;
+            let shown = self.host.shown_by_indexed_heaps(all.iter().copied());
+            let only_heap = shown.iter().filter(|k| !named.contains(k));
+            let bytes: u64 = only_heap
+                .clone()
+                .filter_map(|k| self.textures.get(&self.owner_of(*k)))
+                .map(|t| t.info.size as u64)
+                .sum();
+            let count = only_heap.count() as u64;
+            let named_bytes: u64 = named
+                .iter()
+                .filter_map(|k| self.textures.get(&self.owner_of(*k)))
+                .map(|t| t.info.size as u64)
+                .sum();
+            HEAP_ONLY[0].store(bytes, std::sync::atomic::Ordering::Relaxed);
+            HEAP_ONLY[1].store(count, std::sync::atomic::Ordering::Relaxed);
+            HEAP_ONLY[2].store(named_bytes, std::sync::atomic::Ordering::Relaxed);
+            HEAP_ONLY[3].store(named.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         // The submission about to be encoded is the next GPU epoch: a copy it names stays until
         // the work queued so far has finished, which is when the GPU has read the entries this
         // submission and the ones before it could name.

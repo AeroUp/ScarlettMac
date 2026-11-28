@@ -3893,6 +3893,42 @@ fn a_copy_a_table_names_is_not_given_up_though_a_heap_shows_it() {
     drop(views);
 }
 
+/// Over the budget every submission reads its tables for the copies they name
+/// ([`Title::keep_named`]), but what only an indexed heap shows (`HEAP_ONLY`, a walk of every copy
+/// those heaps show: some 10,000 in a world frame of ~23 submissions, under the host's lock) is
+/// only printed by the budget's trace, once a second: it is worked out at the submission the trace
+/// logs at, not at every one. The names themselves are unchanged.
+#[test]
+fn the_heap_only_figures_are_not_worked_out_at_every_submission() {
+    use crate::native::textures::heap_only_figures_due;
+    assert!(!heap_only_figures_due(false, false), "no trace due: nothing to work out");
+    assert!(heap_only_figures_due(true, false), "the submission the trace logs at");
+    assert!(heap_only_figures_due(false, true), "VICTORY_HEAP_ONLY_EVERY_SUBMISSION: as before");
+    if std::env::var_os("VICTORY_TRACE_TEXTURE_SYNC").is_some()
+        || std::env::var_os("VICTORY_HEAP_ONLY_EVERY_SUBMISSION").is_some()
+    {
+        return;
+    }
+    let Some((mut t, pool)) = budget_title() else { return };
+    let live = budget_texture(&mut t, &pool, 0x4000, 0, 0x22);
+    t.sync_textures();
+    let views = vec![0u32; 8];
+    show(&mut t, &views, live);
+    t.set_texture_budget(1);
+    assert!(t.names_wanted(), "over budget: every submission reads its tables");
+    let (l, _color, _records) = sampling_list(&mut t, &pool, live);
+    let before = t.stats.heap_only_figures;
+    for _ in 0..3 {
+        let named = t.keep_named(std::iter::once(&l));
+        assert!(named.contains(&live), "the table still names its copy");
+        let _ = t.sync_jobs();
+        assert!(t.host.knows(live), "named by the submission: kept");
+        t.let_named_go(named);
+    }
+    assert_eq!(t.stats.heap_only_figures, before, "the trace-only walk ran at a submission no trace logs at");
+    drop(views);
+}
+
 /// A placed copy another placement covers at another start is given up at the next sync once
 /// nothing uses it; one a heap entry still shows stays until the title writes another record over
 /// that entry (work in flight may read it through the entry). One named again comes back for its

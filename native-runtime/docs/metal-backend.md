@@ -856,6 +856,13 @@ after each frame line (`native/locktime.rs`):
 
 Off, each timer is one read of a cached switch.
 
+**What changed with it.** Over the texture budget every submission reads its tables (`Title::keep_named`).
+Each one also walked every copy the heaps that a heap-indexing shader binds show (9,300 to 10,200 in the run
+above, `texture budget: ... copies only heap entries a shader indexes show`) to work out figures only the
+budget's trace prints, once a second (`HEAP_ONLY`). They are now worked out only at the submission that trace
+logs at. `VICTORY_HEAP_ONLY_EVERY_SUBMISSION=1` restores the walk at every submission, to compare runs
+(`heap_shown_ms` in the lock line). Test: `texture_tests::the_heap_only_figures_are_not_worked_out_at_every_submission`.
+
 **Next, by what the run suggests (each to be confirmed by the lock line).**
 
 - The texture budget churns. At 512 MiB against about 1 GiB of copies a world uses, 150 to 1,079 copies a
