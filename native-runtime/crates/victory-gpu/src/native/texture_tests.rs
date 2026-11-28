@@ -3717,7 +3717,7 @@ fn a_decoded_texture_is_kept_under_the_bytes_it_came_from() {
     let dir = DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("victory-texture-cache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = crate::texture_cache::use_dir(dir.clone());
+        let _ = crate::texture_cache::open_dir(dir.clone());
         dir
     });
     assert!(dir.exists() || dir.with_extension("x").exists() || true);

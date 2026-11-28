@@ -308,8 +308,8 @@ pub fn run(
     // fixed drives are the package as `G:` and temporary files `T:`.
     let cfg = victory_core::Config::load()?;
     victory_gpu::shader_cache::use_native_cache(cfg.cache_subdir("native-shaders")?);
-    // What each detile made, keyed by the bytes it made it from: later runs and a texture streamed
-    // in again skip the detile (and the `to_host` conversion) entirely.
+    // What each detile made, keyed by the bytes it made it from (off unless
+    // `VICTORY_TEXTURE_CACHE=1`: under Rosetta a hit costs more than the detile it saves).
     victory_gpu::texture_cache::use_dir(cfg.cache_subdir("native-textures")?);
     // A released decoded copy's title pages are PROT_NONE: a title access faults, and this
     // helper's callback re-materialises the console bytes from the Metal texture before the

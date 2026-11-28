@@ -2,6 +2,12 @@
 //! bytes it was detiled from and the layout it was detiled for, so a later run (or the same
 //! texture streamed in again) skips the detile and its `to_host` conversion entirely.
 //!
+//! **Off unless `VICTORY_TEXTURE_CACHE=1`.** Under Rosetta a lookup that hits costs more than the
+//! detile it saves (a 2048x2048 RGBA8 texture with its mips, 21 MiB: detiled in 2.4 to 5.8 ms, read
+//! back from an entry in about 67 ms, stored in about 90 ms, mostly inflating, deflating and the
+//! entry's blake3; BC1 and BC7: 0.3 and 0.6 ms against 2 and 3 ms for a hit), and it needs every
+//! texture's bytes hashed whole for its key.
+//!
 //! This is the texture side of the shader cache's design (`shader_cache`): content-addressed, one
 //! file per entry, written to a temporary name and renamed so a reader sees all of it or none, and
 //! each entry starts with the blake3 sum of the rest: an entry that is damaged or cut short is a
@@ -67,14 +73,27 @@ pub struct Cache {
     pruning: AtomicBool,
 }
 
-/// Keeps decoded textures in `dir` from now on (creating it). `None` with
-/// `VICTORY_NO_TEXTURE_CACHE` set or when the folder cannot be made. Returns the folder.
+/// Whether the cache is wanted: `VICTORY_TEXTURE_CACHE` (`on`) set to anything but empty or `0`,
+/// and `VICTORY_NO_TEXTURE_CACHE` (`off`) not (it still turns the cache off).
+pub fn wanted(on: Option<&str>, off: Option<&str>) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0");
+    set(on) && !set(off)
+}
+
+/// Keeps decoded textures in `dir` from now on (creating it) when [`wanted`]. `None` when it is
+/// not, or when the folder cannot be made. Returns the folder.
 pub fn use_dir(dir: PathBuf) -> Option<PathBuf> {
-    if std::env::var_os("VICTORY_NO_TEXTURE_CACHE").is_some_and(|v| !v.is_empty() && v != "0") {
-        tracing::info!("decoded texture cache off (VICTORY_NO_TEXTURE_CACHE)");
+    let var = |name| std::env::var(name).ok();
+    if !wanted(var("VICTORY_TEXTURE_CACHE").as_deref(), var("VICTORY_NO_TEXTURE_CACHE").as_deref()) {
+        tracing::info!("decoded texture cache off (VICTORY_TEXTURE_CACHE=1 turns it on)");
         let _ = CACHE.set(None);
         return None;
     }
+    open_dir(dir)
+}
+
+/// [`use_dir`] whatever the environment says.
+pub fn open_dir(dir: PathBuf) -> Option<PathBuf> {
     let limit = limit_mib(std::env::var("VICTORY_TEXTURE_CACHE_MB").ok().as_deref()) << 20;
     match Cache::open(dir, limit) {
         Ok(cache) => {
@@ -580,6 +599,18 @@ mod tests {
         assert_eq!(walk(dir.path()).len(), 2, "one entry deleted");
         assert!(!sizes[0].0.exists(), "the oldest is the one given up");
         assert!(sizes[1].0.exists() && sizes[2].0.exists());
+    }
+
+    /// Off unless asked for: a hit costs more than the detile it saves (the module's notes).
+    #[test]
+    fn the_cache_is_off_unless_asked_for() {
+        assert!(!wanted(None, None));
+        assert!(!wanted(Some(""), None));
+        assert!(!wanted(Some("0"), None));
+        assert!(wanted(Some("1"), None));
+        assert!(wanted(Some("1"), Some("0")));
+        assert!(!wanted(Some("1"), Some("1")));
+        assert!(!wanted(None, Some("1")));
     }
 
     /// The cap's own setting: 10 GiB by default, `VICTORY_TEXTURE_CACHE_MB` in MiB, 0 off.

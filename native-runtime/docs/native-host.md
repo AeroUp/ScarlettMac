@@ -1454,6 +1454,10 @@ and Metal then failed ordinary command buffers with `kIOGPUCommandBufferCallback
   `the_same_bytes_are_one_entry_that_takes_more_levels`,
   `the_folder_is_pruned_least_recently_used_first`, `the_cap_is_ten_gib_unless_set`,
   `a_decoded_texture_is_kept_under_the_bytes_it_came_from`.
+  **Off since 29 November unless `VICTORY_TEXTURE_CACHE=1`.** Under Rosetta a hit costs more than the
+  detile it saves: 2048x2048 RGBA8 with mips (21 MiB) detiles in 2.4 to 5.8 ms, comes back from an
+  entry in 67 ms and is stored in 90 ms (inflate, deflate, the seal's blake3); BC1 0.3 ms against
+  a 2 ms hit. Test: `the_cache_is_off_unless_asked_for`.
 * **What may go.** A copy is never given up while a submission's tables named it within the last
   `VICTORY_TEXTURE_NAMED_KEEP` submissions (default 8; `0` is the old rule, kept for measuring):
   the budget was taking copies a later draw of the same or the next frame needed, which were then
