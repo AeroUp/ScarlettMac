@@ -10,7 +10,7 @@ Help us test Xbox Series X|S compatibility on Apple Silicon. Reproducible bug re
 | Improve the setup guide | The command that failed, what fixed it, and the versions you used. |
 | Reproduce a rendering, input, or audio problem | A small synthetic fixture or a repeatable sequence, with the expected and observed behavior. |
 
-Check the [open issues](https://github.com/paveledits/ScarlettMac/issues) for existing reports and the [compatibility notes](docs/compatibility.md) for known limitations.
+Check the [open issues](https://github.com/AeroUp/scarlettmac-native/issues) for existing reports and the [native run details](docs/native-series-s.md) for known limitations.
 
 ## Prepare the source
 
@@ -33,11 +33,11 @@ scripts/build.sh --test-title
 scripts/run.sh --test-title
 ```
 
-The launcher creates fresh test data for each run. The test exits with the number of failed checks. The three documented runs returned 7, 6, and 7. Record the test names and the relevant output so someone else can compare the result. [Compatibility notes](docs/compatibility.md)
+The launcher creates fresh test data for each run. The test exits with the number of failed checks. The three documented runs returned 7, 6, and 7. Record the test names and the relevant output so someone else can compare the result. [Compatibility notes](docs/native-series-s.md)
 
 ## Report a result
 
-Use the [issue form](https://github.com/paveledits/ScarlettMac/issues/new/choose). For a game result, state the runtime used, the exact build and the furthest stage you observed. A rendered cinematic shows the game reached 3D. Gameplay requires a visible response to player input.
+Use the [issue form](https://github.com/AeroUp/scarlettmac-native/issues/new/choose). For a game result, state the runtime used, the exact build and the furthest stage you observed. A rendered cinematic shows the game reached 3D. Gameplay requires a visible response to player input.
 
 Include the smallest useful log excerpt with the first relevant error and the lines around it. Remove account details, local paths and machine identifiers. Keep game files, keys and executables out of reports.
 

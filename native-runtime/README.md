@@ -85,11 +85,11 @@ You need:
 **1. Get the code and build it.**
 
 ```bash
-git clone https://github.com/AeroUp/ScarlettMac.git
+git clone https://github.com/AeroUp/scarlettmac-native.git
 ```
 
 ```bash
-cd ScarlettMac/native-runtime && tools/macos/native-setup.sh
+cd scarlettmac-native/native-runtime && tools/macos/native-setup.sh
 ```
 
 The setup script checks Rosetta, the Xcode command line tools, rustup and the Metal Shader Converter. It tells you exactly what to install if anything is missing, then builds `victory`.
